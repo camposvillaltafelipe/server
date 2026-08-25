@@ -10,10 +10,10 @@ app.use(bodyParser.json());
 app.use(cors());
 
 const conexion = mysql.createConnection({
-    host: "localhost",
-    user: "root",
-    password: "12345",
-    database: "inventario_db"
+    host: "b7mbqylgdnfyz4tlqekm-mysql.services.clever-cloud.com",
+    user: "uea1zze9enn2xxe4",
+    password: "d9MgB6DCy5Bp4tPNWnPd",
+    database: "b7mbqylgdnfyz4tlqekm"
 });
 
 conexion.connect(err => {
