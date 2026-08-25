@@ -51,7 +51,7 @@ app.get("/", (req, res) => {
 //        https://<store>.public.blob.vercel-storage.com/qr_materiales/material_1_taladro.png
 //   5) Repite el paso 3 cada vez que agregues materiales nuevos.
 // =============================================================================
-app.get("/qr_materiales", (req, res) => {
+app.get("/generar_qr", (req, res) => {
     conexion.query("SELECT id, nombre FROM materiales", (err, materiales) => {
         if (err) {
             res.json({ status: "error", mensaje: err });
