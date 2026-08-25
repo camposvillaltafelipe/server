@@ -2,7 +2,7 @@ const express = require("express");
 const mysql = require("mysql2");
 const bodyParser = require("body-parser");
 const cors = require("cors");
-const { generarQRMateriales, carpetaQR } = require("./generar_qr.js");
+const { generarQRMateriales } = require("./generar_qr.js");
 
 const app = express();
 
@@ -29,20 +29,28 @@ app.get("/", (req, res) => {
 // Guía 11: Generación de códigos QR para materiales.
 // -----------------------------------------------------------------------------
 // La lógica de generación vive en el archivo aparte "generar_qr.js"; aquí
-// solo se importa y se expone como endpoint. Al visitarlo (en el navegador
-// o con Postman) genera un PNG de QR por cada material existente y los deja
-// en la carpeta "qr_materiales/".
+// solo se importa y se expone como endpoint.
+//
+// CAMBIO (Vercel): los QR ya NO se guardan en disco ni se sirven como
+// archivos estáticos locales (Vercel no permite escribir en el filesystem
+// del proyecto). Ahora "generarQRMateriales" sube cada PNG a Vercel Blob,
+// dentro de la carpeta "qr_materiales/", y devuelve directamente las URLs
+// públicas de Blob. Por eso ya no existe el app.use("/qr", express.static(...))
+// ni la carpeta física "qr_materiales" en el servidor: las URLs que llegan
+// en "archivos" ya son enlaces completos y listos para usar (<img src=...>,
+// descarga directa, etc.).
 //
 // Cómo usarlo:
-//   1) Instala la librería una sola vez: npm install qrcode
-//   2) Con el servidor corriendo, visita en el navegador:
-//        http://192.168.1.101:3000/generar-qr
-//   3) Los QR quedan accesibles también como archivos estáticos en:
-//        http://192.168.1.101:3000/qr/material_<id>_<nombre>.png
-//   4) Repite el paso 2 cada vez que agregues materiales nuevos.
+//   1) Instala las librerías una sola vez: npm install qrcode @vercel/blob
+//   2) Conecta un Blob Store al proyecto en Vercel (Storage > Blob > Connect
+//      Project) para que exista la variable de entorno BLOB_READ_WRITE_TOKEN.
+//   3) Con el servidor corriendo (o desplegado), visita:
+//        https://<tu-dominio>.vercel.app/generar-qr
+//   4) La respuesta trae "archivos": un arreglo de URLs de Vercel Blob, una
+//      por cada material, ej:
+//        https://<store>.public.blob.vercel-storage.com/qr_materiales/material_1_taladro.png
+//   5) Repite el paso 3 cada vez que agregues materiales nuevos.
 // =============================================================================
-app.use("/qr", express.static(carpetaQR));
-
 app.get("/generar-qr", (req, res) => {
     conexion.query("SELECT id, nombre FROM materiales", (err, materiales) => {
         if (err) {
@@ -57,7 +65,7 @@ app.get("/generar-qr", (req, res) => {
 
         generarQRMateriales(materiales, (errQR, archivos) => {
             if (errQR) {
-                res.json({ status: "error", mensaje: errQR });
+                res.json({ status: "error", mensaje: errQR.message || errQR });
                 return;
             }
             res.json({
