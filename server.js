@@ -9,16 +9,52 @@ const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
-const conexion = mysql.createConnection({
+// =============================================================================
+// FIX: Pool de conexiones en vez de conexión única.
+// -----------------------------------------------------------------------------
+// El bug de "se queda cargando indefinidamente" (sobre todo notorio en
+// /reportes/pdf, pero en realidad latente en TODOS los endpoints) ocurre
+// porque en Vercel cada función serverless puede reutilizar o "congelar" el
+// proceso entre invocaciones. Con mysql.createConnection() se abre UNA sola
+// conexión al arrancar el módulo; si esa conexión se cae, expira por
+// inactividad (wait_timeout de MySQL) o el proceso se congela, las próximas
+// consultas nunca disparan ni el callback de éxito ni el de error: la
+// petición queda colgada para siempre (de ahí el "cargando" infinito, tanto
+// en la app como al pegar la URL directo en el navegador).
+//
+// Con mysql.createPool():
+//   - Cada query toma una conexión libre del pool (o crea una nueva si hace
+//     falta), la usa y la libera. Si una conexión está muerta, el pool
+//     simplemente descarta esa y abre otra — no depende de una única
+//     conexión "viva para siempre".
+//   - No hace falta (ni existe) un evento "connect" para un pool; por eso
+//     se quita el conexion.connect(...) de antes.
+//   - "waitForConnections: true" hace que las peticiones esperen en cola si
+//     el pool está lleno, en vez de fallar.
+//   - "connectTimeout" evita que una conexión rota se quede intentando para
+//     siempre sin nunca responder.
+// =============================================================================
+const conexion = mysql.createPool({
     host: "b7mbqylgdnfyz4tlqekm-mysql.services.clever-cloud.com",
     user: "uea1zze9enn2xxe4",
     password: "d9MgB6DCy5Bp4tPNWnPd",
-    database: "b7mbqylgdnfyz4tlqekm"
+    database: "b7mbqylgdnfyz4tlqekm",
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+    connectTimeout: 10000, // 10s: si no conecta, falla en vez de colgarse
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000
 });
 
-conexion.connect(err => {
-    if (err) throw err;
-    console.log("Conectado a MariaDB (XAMPP)");
+// Verificación de arranque (opcional, solo para ver el log en local/Vercel).
+conexion.getConnection((err, connTest) => {
+    if (err) {
+        console.error("No se pudo conectar al pool de MariaDB:", err.message);
+        return;
+    }
+    console.log("Conectado a MariaDB (pool)");
+    connTest.release();
 });
 
 app.get("/", (req, res) => {
@@ -573,6 +609,12 @@ function construirFiltro(req) {
 // y lo envía de una sola vez con res.send(). Esto evita que la función
 // serverless de Vercel se quede esperando indefinidamente, algo que sí
 // ocurría con doc.pipe(res) (streaming directo a la respuesta).
+//
+// FIX adicional: se agregó un timeout de seguridad (15s) alrededor de la
+// consulta SQL. Si el pool de conexiones tarda demasiado o se cuelga, el
+// endpoint responde con un error explícito en vez de dejar la petición
+// "cargando" para siempre (esto es lo que veías tanto en la app como al
+// pegar la URL directo en el navegador).
 app.get("/reportes/pdf", (req, res) => {
     const { whereSQL, valores } = construirFiltro(req);
 
@@ -586,51 +628,79 @@ app.get("/reportes/pdf", (req, res) => {
         ORDER BY prestamos.fecha_prestamo DESC
     `;
 
+    let respondido = false;
+
+    // Salvavidas: si en 15s no ha pasado nada, responde con error en vez
+    // de dejar al cliente esperando para siempre.
+    const timeoutId = setTimeout(() => {
+        if (!respondido) {
+            respondido = true;
+            res.status(504).json({
+                status: "error",
+                mensaje: "Tiempo de espera agotado consultando la base de datos"
+            });
+        }
+    }, 15000);
+
     conexion.query(sql, valores, (err, result) => {
+        if (respondido) return; // el timeout ya respondió, no seguir
+        clearTimeout(timeoutId);
+
         if (err) {
-            res.status(500).json({ status: "error", mensaje: err });
+            respondido = true;
+            res.status(500).json({ status: "error", mensaje: err.message || err });
             return;
         }
 
-        const doc = new PDFDocument({ margin: 40 });
-        const chunks = [];
+        try {
+            const doc = new PDFDocument({ margin: 40 });
+            const chunks = [];
 
-        doc.on("data", (chunk) => chunks.push(chunk));
+            doc.on("data", (chunk) => chunks.push(chunk));
 
-        doc.on("end", () => {
-            const pdfBuffer = Buffer.concat(chunks);
-            res.setHeader("Content-Type", "application/pdf");
-            res.setHeader("Content-Disposition", "attachment; filename=reporte.pdf");
-            res.setHeader("Content-Length", pdfBuffer.length);
-            res.status(200).send(pdfBuffer);
-        });
+            doc.on("end", () => {
+                if (respondido) return;
+                respondido = true;
+                const pdfBuffer = Buffer.concat(chunks);
+                res.setHeader("Content-Type", "application/pdf");
+                res.setHeader("Content-Disposition", "attachment; filename=reporte.pdf");
+                res.setHeader("Content-Length", pdfBuffer.length);
+                res.status(200).send(pdfBuffer);
+            });
 
-        doc.on("error", (errPdf) => {
-            res.status(500).json({ status: "error", mensaje: errPdf.message });
-        });
+            doc.on("error", (errPdf) => {
+                if (respondido) return;
+                respondido = true;
+                res.status(500).json({ status: "error", mensaje: errPdf.message });
+            });
 
-        doc.fontSize(18).text("Reporte de Préstamos - Inventario Escolar", { align: "center" });
-        doc.moveDown();
-        doc.fontSize(10).fillColor("gray").text(`Generado: ${new Date().toLocaleString()}`, { align: "center" });
-        doc.moveDown(1.5);
+            doc.fontSize(18).text("Reporte de Préstamos - Inventario Escolar", { align: "center" });
+            doc.moveDown();
+            doc.fontSize(10).fillColor("gray").text(`Generado: ${new Date().toLocaleString()}`, { align: "center" });
+            doc.moveDown(1.5);
 
-        doc.fillColor("black").fontSize(11);
-        result.forEach((p, i) => {
-            doc.font("Helvetica-Bold").text(`${i + 1}. ${p.material}`);
-            doc.font("Helvetica").fontSize(10).fillColor("#333");
-            doc.text(`Maestro: ${p.maestro}`);
-            doc.text(`Préstamo: ${p.fecha_prestamo}`);
-            doc.text(`Devolución: ${p.fecha_devolucion || "Pendiente"}`);
-            doc.text(`Estado: ${p.devuelto ? "Devuelto" : "Pendiente"}`);
-            doc.moveDown(0.8);
             doc.fillColor("black").fontSize(11);
-        });
+            result.forEach((p, i) => {
+                doc.font("Helvetica-Bold").text(`${i + 1}. ${p.material}`);
+                doc.font("Helvetica").fontSize(10).fillColor("#333");
+                doc.text(`Maestro: ${p.maestro}`);
+                doc.text(`Préstamo: ${p.fecha_prestamo}`);
+                doc.text(`Devolución: ${p.fecha_devolucion || "Pendiente"}`);
+                doc.text(`Estado: ${p.devuelto ? "Devuelto" : "Pendiente"}`);
+                doc.moveDown(0.8);
+                doc.fillColor("black").fontSize(11);
+            });
 
-        if (result.length === 0) {
-            doc.text("No se encontraron registros con los filtros aplicados.");
+            if (result.length === 0) {
+                doc.text("No se encontraron registros con los filtros aplicados.");
+            }
+
+            doc.end();
+        } catch (errGen) {
+            if (respondido) return;
+            respondido = true;
+            res.status(500).json({ status: "error", mensaje: errGen.message || String(errGen) });
         }
-
-        doc.end();
     });
 });
 
@@ -653,43 +723,47 @@ app.get("/reportes/excel", async (req, res) => {
             return;
         }
 
-        const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet("Préstamos");
+        try {
+            const workbook = new ExcelJS.Workbook();
+            const sheet = workbook.addWorksheet("Préstamos");
 
-        sheet.columns = [
-            { header: "Material", key: "material", width: 25 },
-            { header: "Maestro", key: "maestro", width: 20 },
-            { header: "Fecha Préstamo", key: "fecha_prestamo", width: 22 },
-            { header: "Fecha Devolución", key: "fecha_devolucion", width: 22 },
-            { header: "Estado", key: "estado", width: 15 },
-        ];
+            sheet.columns = [
+                { header: "Material", key: "material", width: 25 },
+                { header: "Maestro", key: "maestro", width: 20 },
+                { header: "Fecha Préstamo", key: "fecha_prestamo", width: 22 },
+                { header: "Fecha Devolución", key: "fecha_devolucion", width: 22 },
+                { header: "Estado", key: "estado", width: 15 },
+            ];
 
-        sheet.getRow(1).font = { bold: true };
-        sheet.getRow(1).fill = {
-            type: "pattern",
-            pattern: "solid",
-            fgColor: { argb: "FF2F6FED" },
-        };
-        sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+            sheet.getRow(1).font = { bold: true };
+            sheet.getRow(1).fill = {
+                type: "pattern",
+                pattern: "solid",
+                fgColor: { argb: "FF2F6FED" },
+            };
+            sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
 
-        result.forEach((p) => {
-            sheet.addRow({
-                material: p.material,
-                maestro: p.maestro,
-                fecha_prestamo: p.fecha_prestamo,
-                fecha_devolucion: p.fecha_devolucion || "Pendiente",
-                estado: p.devuelto ? "Devuelto" : "Pendiente",
+            result.forEach((p) => {
+                sheet.addRow({
+                    material: p.material,
+                    maestro: p.maestro,
+                    fecha_prestamo: p.fecha_prestamo,
+                    fecha_devolucion: p.fecha_devolucion || "Pendiente",
+                    estado: p.devuelto ? "Devuelto" : "Pendiente",
+                });
             });
-        });
 
-        res.setHeader(
-            "Content-Type",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
-        res.setHeader("Content-Disposition", "attachment; filename=reporte.xlsx");
+            res.setHeader(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            );
+            res.setHeader("Content-Disposition", "attachment; filename=reporte.xlsx");
 
-        await workbook.xlsx.write(res);
-        res.end();
+            await workbook.xlsx.write(res);
+            res.end();
+        } catch (errGen) {
+            res.status(500).json({ status: "error", mensaje: errGen.message || String(errGen) });
+        }
     });
 });
 
