@@ -45,7 +45,7 @@ app.get("/", (req, res) => {
 //   2) Conecta un Blob Store al proyecto en Vercel (Storage > Blob > Connect
 //      Project) para que exista la variable de entorno BLOB_READ_WRITE_TOKEN.
 //   3) Con el servidor corriendo (o desplegado), visita:
-//        https://<tu-dominio>.vercel.app/generar-qr
+//        https://<tu-dominio>.vercel.app/generar_qr
 //   4) La respuesta trae "archivos": un arreglo de URLs de Vercel Blob, una
 //      por cada material, ej:
 //        https://<store>.public.blob.vercel-storage.com/qr_materiales/material_1_taladro.png
@@ -230,7 +230,7 @@ app.get("/permisos", (req, res) => {
 // nombre EXACTO del maestro (con corchetes para ver espacios ocultos) y el
 // tipo real de cada valor puede_*, para detectar por qué un permiso ya
 // asignado no está siendo reconocido por /prestamos o /prestamos/devolver-qr.
-// Visítalo en el navegador: http://192.168.1.101:3000/debug/permisos
+// Visítalo en el navegador: https://<tu-dominio>.vercel.app/debug/permisos
 app.get("/debug/permisos", (req, res) => {
     const sql = `
         SELECT permisos.id, permisos.maestro, permisos.material_id,
@@ -696,6 +696,19 @@ app.get("/reportes/excel", async (req, res) => {
     });
 });
 
-app.listen(3000, () => {
-    console.log("Servidor en http://192.168.1.101:3000");
-});
+// =============================================================================
+// Arranque del servidor
+// -----------------------------------------------------------------------------
+// En Vercel NO se usa app.listen(): Vercel invoca la app directamente como
+// función serverless en cada petición HTTP entrante. app.listen() solo se
+// ejecuta cuando corres el archivo directamente en local con "node server.js"
+// (require.main === module es true en ese caso, y false cuando Vercel
+// importa este archivo como módulo).
+// =============================================================================
+if (require.main === module) {
+    app.listen(3000, () => {
+        console.log("Servidor local en http://localhost:3000");
+    });
+}
+
+module.exports = app;
