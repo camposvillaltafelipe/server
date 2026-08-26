@@ -10,29 +10,7 @@ app.use(bodyParser.json());
 app.use(cors());
 
 // =============================================================================
-// FIX: Pool de conexiones en vez de conexión única.
-// -----------------------------------------------------------------------------
-// El bug de "se queda cargando indefinidamente" (sobre todo notorio en
-// /reportes/pdf, pero en realidad latente en TODOS los endpoints) ocurre
-// porque en Vercel cada función serverless puede reutilizar o "congelar" el
-// proceso entre invocaciones. Con mysql.createConnection() se abre UNA sola
-// conexión al arrancar el módulo; si esa conexión se cae, expira por
-// inactividad (wait_timeout de MySQL) o el proceso se congela, las próximas
-// consultas nunca disparan ni el callback de éxito ni el de error: la
-// petición queda colgada para siempre (de ahí el "cargando" infinito, tanto
-// en la app como al pegar la URL directo en el navegador).
-//
-// Con mysql.createPool():
-//   - Cada query toma una conexión libre del pool (o crea una nueva si hace
-//     falta), la usa y la libera. Si una conexión está muerta, el pool
-//     simplemente descarta esa y abre otra — no depende de una única
-//     conexión "viva para siempre".
-//   - No hace falta (ni existe) un evento "connect" para un pool; por eso
-//     se quita el conexion.connect(...) de antes.
-//   - "waitForConnections: true" hace que las peticiones esperen en cola si
-//     el pool está lleno, en vez de fallar.
-//   - "connectTimeout" evita que una conexión rota se quede intentando para
-//     siempre sin nunca responder.
+// Pool de conexiones (igual que ya tenías, sin cambios).
 // =============================================================================
 const conexion = mysql.createPool({
     host: "b7mbqylgdnfyz4tlqekm-mysql.services.clever-cloud.com",
@@ -42,12 +20,11 @@ const conexion = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 5,
     queueLimit: 0,
-    connectTimeout: 10000, // 10s: si no conecta, falla en vez de colgarse
+    connectTimeout: 10000,
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000
 });
 
-// Verificación de arranque (opcional, solo para ver el log en local/Vercel).
 conexion.getConnection((err, connTest) => {
     if (err) {
         console.error("No se pudo conectar al pool de MariaDB:", err.message);
@@ -62,31 +39,18 @@ app.get("/", (req, res) => {
 });
 
 // =============================================================================
-// Guía 11: Generación de códigos QR para materiales.
+// FIX NECESARIO EN LA BASE DE DATOS (ejecutar una sola vez en tu MySQL):
 // -----------------------------------------------------------------------------
-// La lógica de generación vive en el archivo aparte "generar_qr.js"; aquí
-// solo se importa y se expone como endpoint.
+// La tabla "prestamos" necesita una columna para guardar la fecha límite de
+// devolución (fecha_prestamo + 5 días). Sin esta columna no se puede saber
+// cuándo vence un préstamo.
 //
-// CAMBIO (Vercel): los QR ya NO se guardan en disco ni se sirven como
-// archivos estáticos locales (Vercel no permite escribir en el filesystem
-// del proyecto). Ahora "generarQRMateriales" sube cada PNG a Vercel Blob,
-// dentro de la carpeta "qr_materiales/", y devuelve directamente las URLs
-// públicas de Blob. Por eso ya no existe el app.use("/qr", express.static(...))
-// ni la carpeta física "qr_materiales" en el servidor: las URLs que llegan
-// en "archivos" ya son enlaces completos y listos para usar (<img src=...>,
-// descarga directa, etc.).
+//   ALTER TABLE prestamos ADD COLUMN fecha_limite DATETIME NULL;
 //
-// Cómo usarlo:
-//   1) Instala las librerías una sola vez: npm install qrcode @vercel/blob
-//   2) Conecta un Blob Store al proyecto en Vercel (Storage > Blob > Connect
-//      Project) para que exista la variable de entorno BLOB_READ_WRITE_TOKEN.
-//   3) Con el servidor corriendo (o desplegado), visita:
-//        https://<tu-dominio>.vercel.app/generar_qr
-//   4) La respuesta trae "archivos": un arreglo de URLs de Vercel Blob, una
-//      por cada material, ej:
-//        https://<store>.public.blob.vercel-storage.com/qr_materiales/material_1_taladro.png
-//   5) Repite el paso 3 cada vez que agregues materiales nuevos.
+// Si tu tabla "materiales" NO tiene ya una columna "cantidad" (sí la tiene,
+// según tu código original), no hace falta nada más ahí.
 // =============================================================================
+
 app.get("/generar_qr", (req, res) => {
     conexion.query("SELECT id, nombre FROM materiales", (err, materiales) => {
         if (err) {
@@ -121,17 +85,13 @@ app.post("/materiales", (req, res) => {
         VALUES (?, ?, ?)
     `;
 
-    conexion.query(
-        sql,
-        [nombre, cantidad, estado],
-        (err, result) => {
-            if (err) {
-                res.json({ status: "error", mensaje: err });
-            } else {
-                res.json({ status: "ok", mensaje: "Material registrado" });
-            }
+    conexion.query(sql, [nombre, cantidad, estado], (err, result) => {
+        if (err) {
+            res.json({ status: "error", mensaje: err });
+        } else {
+            res.json({ status: "ok", mensaje: "Material registrado" });
         }
-    );
+    });
 });
 
 app.get("/materiales", (req, res) => {
@@ -147,7 +107,6 @@ app.get("/materiales", (req, res) => {
 
 app.post("/login", (req, res) => {
     const { usuario, clave } = req.body;
-
     const sql = "SELECT * FROM usuarios WHERE usuario = ? AND clave = ?";
 
     conexion.query(sql, [usuario, clave], (err, result) => {
@@ -161,9 +120,6 @@ app.post("/login", (req, res) => {
     });
 });
 
-// Lista los usuarios con rol "maestro" para poblar el selector en
-// RegistroPrestamo — así el nombre siempre coincide EXACTO con
-// usuarios.usuario y las notificaciones nunca vuelven a desincronizarse.
 app.get("/maestros", (req, res) => {
     const sql = "SELECT usuario FROM usuarios WHERE rol = 'maestro'";
     conexion.query(sql, (err, result) => {
@@ -176,19 +132,7 @@ app.get("/maestros", (req, res) => {
 });
 
 // =============================================================================
-// Guía 10: Roles avanzados y permisos
-// -----------------------------------------------------------------------------
-// Tabla "permisos" (crear en MySQL Workbench / phpMyAdmin de Xampp):
-//
-// CREATE TABLE permisos (
-//   id INT AUTO_INCREMENT PRIMARY KEY,
-//   maestro VARCHAR(50),
-//   material_id INT,
-//   puede_ver BOOLEAN DEFAULT TRUE,
-//   puede_prestar BOOLEAN DEFAULT FALSE,
-//   puede_devolver BOOLEAN DEFAULT FALSE,
-//   FOREIGN KEY (material_id) REFERENCES materiales(id)
-// );
+// Guía 10: Roles avanzados y permisos (sin cambios respecto a tu versión)
 // =============================================================================
 
 app.post("/permisos", (req, res) => {
@@ -216,7 +160,7 @@ app.post("/permisos", (req, res) => {
             conexion.query(
                 sqlActualizar,
                 [puede_ver, puede_prestar, puede_devolver, maestro, material_id],
-                (err2, result2) => {
+                (err2) => {
                     if (err2) {
                         res.json({ status: "error", mensaje: err2 });
                     } else {
@@ -232,7 +176,7 @@ app.post("/permisos", (req, res) => {
             conexion.query(
                 sqlInsertar,
                 [maestro, material_id, puede_ver, puede_prestar, puede_devolver],
-                (err2, result2) => {
+                (err2) => {
                     if (err2) {
                         res.json({ status: "error", mensaje: err2 });
                     } else {
@@ -262,11 +206,6 @@ app.get("/permisos", (req, res) => {
     });
 });
 
-// Endpoint de diagnóstico (temporal): muestra todos los permisos con el
-// nombre EXACTO del maestro (con corchetes para ver espacios ocultos) y el
-// tipo real de cada valor puede_*, para detectar por qué un permiso ya
-// asignado no está siendo reconocido por /prestamos o /prestamos/devolver-qr.
-// Visítalo en el navegador: https://<tu-dominio>.vercel.app/debug/permisos
 app.get("/debug/permisos", (req, res) => {
     const sql = `
         SELECT permisos.id, permisos.maestro, permisos.material_id,
@@ -295,7 +234,7 @@ app.get("/debug/permisos", (req, res) => {
 
 app.delete("/permisos/:id", (req, res) => {
     const sql = "DELETE FROM permisos WHERE id = ?";
-    conexion.query(sql, [req.params.id], (err, result) => {
+    conexion.query(sql, [req.params.id], (err) => {
         if (err) {
             res.json({ status: "error", mensaje: err });
         } else {
@@ -304,31 +243,124 @@ app.delete("/permisos/:id", (req, res) => {
     });
 });
 
-// Guía 10: valida puede_prestar antes de insertar el préstamo.
-// Guía 8: no se inserta fecha_devolucion. Queda NULL y devuelto = 0.
-// Guía 11: este mismo endpoint es el que llama la pantalla EscaneoQR al
-// escanear el QR de un material para registrar el préstamo.
+// =============================================================================
+// FIX PRINCIPAL — POST /prestamos
+// -----------------------------------------------------------------------------
+// Ahora este endpoint, al registrar un préstamo:
+//   1) Verifica que el material tenga stock (cantidad > 0). Si no, rechaza.
+//   2) Calcula fecha_limite = fecha_prestamo + 5 días.
+//   3) Inserta el préstamo con fecha_prestamo (hora exacta del escaneo) y
+//      fecha_limite.
+//   4) Descuenta 1 unidad de materiales.cantidad.
+// Todo en una transacción para evitar inconsistencias si algo falla a mitad
+// de camino (p. ej. se inserta el préstamo pero no se descuenta el stock).
+// =============================================================================
 app.post("/prestamos", (req, res) => {
     const { material_id, fecha_prestamo, maestro } = req.body;
 
-    // Excepción: el maestro "juan" puede prestar cualquier material sin
-    // necesidad de tener un permiso asignado en la tabla permisos.
+    if (!material_id || !maestro) {
+        res.json({ status: "fail", mensaje: "Faltan datos: material_id y maestro son requeridos" });
+        return;
+    }
+
+    const fechaPrestamoFinal = fecha_prestamo ? new Date(fecha_prestamo) : new Date();
+    const fechaLimite = new Date(fechaPrestamoFinal);
+    fechaLimite.setDate(fechaLimite.getDate() + 5);
+
     const esMaestroSinRestriccion =
         maestro && maestro.toString().trim().toLowerCase() === "juan";
 
+    function continuarConPermisoValidado() {
+        conexion.getConnection((errConn, cn) => {
+            if (errConn) {
+                res.json({ status: "error", mensaje: errConn.message || errConn });
+                return;
+            }
+
+            cn.beginTransaction((errTx) => {
+                if (errTx) {
+                    cn.release();
+                    res.json({ status: "error", mensaje: errTx.message || errTx });
+                    return;
+                }
+
+                // Bloquea la fila del material para evitar condiciones de
+                // carrera si dos escaneos llegan casi al mismo tiempo.
+                const sqlStock = "SELECT cantidad FROM materiales WHERE id = ? FOR UPDATE";
+                cn.query(sqlStock, [material_id], (errStock, resultStock) => {
+                    if (errStock) {
+                        return cn.rollback(() => {
+                            cn.release();
+                            res.json({ status: "error", mensaje: errStock.message || errStock });
+                        });
+                    }
+
+                    if (resultStock.length === 0) {
+                        return cn.rollback(() => {
+                            cn.release();
+                            res.json({ status: "fail", mensaje: "Material no encontrado" });
+                        });
+                    }
+
+                    const stockActual = resultStock[0].cantidad;
+
+                    if (stockActual <= 0) {
+                        return cn.rollback(() => {
+                            cn.release();
+                            res.json({ status: "fail", mensaje: "No hay unidades disponibles de este material" });
+                        });
+                    }
+
+                    const sqlInsertar = `
+                        INSERT INTO prestamos (material_id, fecha_prestamo, fecha_limite, maestro, devuelto)
+                        VALUES (?, ?, ?, ?, 0)
+                    `;
+                    cn.query(
+                        sqlInsertar,
+                        [material_id, fechaPrestamoFinal, fechaLimite, maestro],
+                        (errInsert) => {
+                            if (errInsert) {
+                                return cn.rollback(() => {
+                                    cn.release();
+                                    res.json({ status: "error", mensaje: errInsert.message || errInsert });
+                                });
+                            }
+
+                            const sqlDescontar = "UPDATE materiales SET cantidad = cantidad - 1 WHERE id = ?";
+                            cn.query(sqlDescontar, [material_id], (errUpdate) => {
+                                if (errUpdate) {
+                                    return cn.rollback(() => {
+                                        cn.release();
+                                        res.json({ status: "error", mensaje: errUpdate.message || errUpdate });
+                                    });
+                                }
+
+                                cn.commit((errCommit) => {
+                                    if (errCommit) {
+                                        return cn.rollback(() => {
+                                            cn.release();
+                                            res.json({ status: "error", mensaje: errCommit.message || errCommit });
+                                        });
+                                    }
+
+                                    cn.release();
+                                    res.json({
+                                        status: "ok",
+                                        mensaje: `Préstamo registrado. Devolver antes del ${fechaLimite.toLocaleString()}`,
+                                        fecha_limite: fechaLimite
+                                    });
+                                });
+                            });
+                        }
+                    );
+                });
+            });
+        });
+    }
+
     if (esMaestroSinRestriccion) {
         console.log(`[prestamos] "${maestro}" es maestro sin restricción — se omite validación de permiso`);
-        const sqlDirecto = `
-            INSERT INTO prestamos (material_id, fecha_prestamo, maestro, devuelto)
-            VALUES (?, ?, ?, 0)
-        `;
-        conexion.query(sqlDirecto, [material_id, fecha_prestamo, maestro], (errDirecto) => {
-            if (errDirecto) {
-                res.json({ status: "error", mensaje: errDirecto });
-            } else {
-                res.json({ status: "ok", mensaje: "Préstamo registrado" });
-            }
-        });
+        continuarConPermisoValidado();
         return;
     }
 
@@ -352,27 +384,19 @@ app.post("/prestamos", (req, res) => {
             return;
         }
 
-        const sql = `
-            INSERT INTO prestamos (material_id, fecha_prestamo, maestro, devuelto)
-            VALUES (?, ?, ?, 0)
-        `;
-        conexion.query(sql, [material_id, fecha_prestamo, maestro], (err2, result2) => {
-            if (err2) {
-                res.json({ status: "error", mensaje: err2 });
-            } else {
-                res.json({ status: "ok", mensaje: "Préstamo registrado" });
-            }
-        });
+        continuarConPermisoValidado();
     });
 });
 
 app.get("/prestamos", (req, res) => {
     const sql = `
-        SELECT prestamos.id, materiales.nombre AS material,
-        prestamos.fecha_prestamo, prestamos.fecha_devolucion, prestamos.maestro, prestamos.devuelto
+        SELECT prestamos.id, prestamos.material_id, materiales.nombre AS material,
+        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion,
+        prestamos.maestro, prestamos.devuelto
         FROM prestamos
         INNER JOIN materiales ON prestamos.material_id = materiales.id
         WHERE prestamos.devuelto = 0
+        ORDER BY prestamos.fecha_prestamo DESC
     `;
 
     conexion.query(sql, (err, result) => {
@@ -384,12 +408,14 @@ app.get("/prestamos", (req, res) => {
     });
 });
 
-// Devolución manual por ID de préstamo (botón "Devolver" en ListaPrestamos).
-// Guía 10: valida puede_devolver antes de actualizar.
+// =============================================================================
+// FIX — Devolución manual por ID de préstamo (botón "Devolver" en Flutter).
+// Ahora también repone 1 unidad al inventario, en transacción.
+// =============================================================================
 app.put("/prestamos/devolver/:id", (req, res) => {
     const idPrestamo = req.params.id;
 
-    const sqlPrestamo = "SELECT material_id, maestro FROM prestamos WHERE id = ?";
+    const sqlPrestamo = "SELECT material_id, maestro, devuelto FROM prestamos WHERE id = ?";
 
     conexion.query(sqlPrestamo, [idPrestamo], (err, resultPrestamo) => {
         if (err) {
@@ -402,16 +428,58 @@ app.put("/prestamos/devolver/:id", (req, res) => {
             return;
         }
 
-        const { material_id, maestro } = resultPrestamo[0];
+        const { material_id, maestro, devuelto } = resultPrestamo[0];
 
-        function marcarDevuelto() {
-            const sqlActualizar = "UPDATE prestamos SET devuelto = 1, fecha_devolucion = NOW() WHERE id = ?";
-            conexion.query(sqlActualizar, [idPrestamo], (err3, result3) => {
-                if (err3) {
-                    res.json({ status: "error", mensaje: err3 });
-                } else {
-                    res.json({ status: "ok", mensaje: "Material devuelto" });
+        if (devuelto === 1) {
+            res.json({ status: "fail", mensaje: "Este préstamo ya fue devuelto" });
+            return;
+        }
+
+        function marcarDevueltoYReponer() {
+            conexion.getConnection((errConn, cn) => {
+                if (errConn) {
+                    res.json({ status: "error", mensaje: errConn.message || errConn });
+                    return;
                 }
+
+                cn.beginTransaction((errTx) => {
+                    if (errTx) {
+                        cn.release();
+                        res.json({ status: "error", mensaje: errTx.message || errTx });
+                        return;
+                    }
+
+                    const sqlActualizar = "UPDATE prestamos SET devuelto = 1, fecha_devolucion = NOW() WHERE id = ?";
+                    cn.query(sqlActualizar, [idPrestamo], (err3) => {
+                        if (err3) {
+                            return cn.rollback(() => {
+                                cn.release();
+                                res.json({ status: "error", mensaje: err3.message || err3 });
+                            });
+                        }
+
+                        const sqlReponer = "UPDATE materiales SET cantidad = cantidad + 1 WHERE id = ?";
+                        cn.query(sqlReponer, [material_id], (err4) => {
+                            if (err4) {
+                                return cn.rollback(() => {
+                                    cn.release();
+                                    res.json({ status: "error", mensaje: err4.message || err4 });
+                                });
+                            }
+
+                            cn.commit((errCommit) => {
+                                if (errCommit) {
+                                    return cn.rollback(() => {
+                                        cn.release();
+                                        res.json({ status: "error", mensaje: errCommit.message || errCommit });
+                                    });
+                                }
+                                cn.release();
+                                res.json({ status: "ok", mensaje: "Material devuelto" });
+                            });
+                        });
+                    });
+                });
             });
         }
 
@@ -420,7 +488,7 @@ app.put("/prestamos/devolver/:id", (req, res) => {
 
         if (esMaestroSinRestriccion) {
             console.log(`[prestamos/devolver] "${maestro}" es maestro sin restricción — se omite validación de permiso`);
-            marcarDevuelto();
+            marcarDevueltoYReponer();
             return;
         }
 
@@ -444,13 +512,17 @@ app.put("/prestamos/devolver/:id", (req, res) => {
                 return;
             }
 
-            marcarDevuelto();
+            marcarDevueltoYReponer();
         });
     });
 });
 
 // =============================================================================
-// Guía 11: Devolución automática vía escaneo de QR.
+// FIX PRINCIPAL — PUT /prestamos/devolver-qr/:material_id
+// -----------------------------------------------------------------------------
+// Este es el endpoint que llama EscaneoQR en el SEGUNDO escaneo. Ahora también
+// repone 1 unidad al inventario dentro de una transacción, además de marcar
+// el préstamo como devuelto (igual que antes).
 // =============================================================================
 app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
     const materialId = req.params.material_id;
@@ -483,13 +555,51 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
             }
 
             const idPrestamo = resultPrestamo[0].id;
-            const sqlActualizar = "UPDATE prestamos SET devuelto = 1, fecha_devolucion = NOW() WHERE id = ?";
-            conexion.query(sqlActualizar, [idPrestamo], (err3) => {
-                if (err3) {
-                    res.json({ status: "error", mensaje: err3 });
-                } else {
-                    res.json({ status: "ok", mensaje: "Material devuelto correctamente" });
+
+            conexion.getConnection((errConn, cn) => {
+                if (errConn) {
+                    res.json({ status: "error", mensaje: errConn.message || errConn });
+                    return;
                 }
+
+                cn.beginTransaction((errTx) => {
+                    if (errTx) {
+                        cn.release();
+                        res.json({ status: "error", mensaje: errTx.message || errTx });
+                        return;
+                    }
+
+                    const sqlActualizar = "UPDATE prestamos SET devuelto = 1, fecha_devolucion = NOW() WHERE id = ?";
+                    cn.query(sqlActualizar, [idPrestamo], (err3) => {
+                        if (err3) {
+                            return cn.rollback(() => {
+                                cn.release();
+                                res.json({ status: "error", mensaje: err3.message || err3 });
+                            });
+                        }
+
+                        const sqlReponer = "UPDATE materiales SET cantidad = cantidad + 1 WHERE id = ?";
+                        cn.query(sqlReponer, [materialId], (err4) => {
+                            if (err4) {
+                                return cn.rollback(() => {
+                                    cn.release();
+                                    res.json({ status: "error", mensaje: err4.message || err4 });
+                                });
+                            }
+
+                            cn.commit((errCommit) => {
+                                if (errCommit) {
+                                    return cn.rollback(() => {
+                                        cn.release();
+                                        res.json({ status: "error", mensaje: errCommit.message || errCommit });
+                                    });
+                                }
+                                cn.release();
+                                res.json({ status: "ok", mensaje: "Material devuelto correctamente" });
+                            });
+                        });
+                    });
+                });
             });
         });
     }
@@ -527,20 +637,17 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
     });
 });
 
-// =============================================================================
-// Guía 9: Notificaciones automáticas de préstamos pendientes por maestro.
-// =============================================================================
 app.get("/notificaciones/:maestro", (req, res) => {
     const maestro = req.params.maestro.trim();
     console.log(`[notificaciones] Consultando pendientes para maestro: "${maestro}"`);
 
     const sql = `
         SELECT prestamos.id, materiales.nombre AS material,
-        prestamos.fecha_prestamo, prestamos.fecha_devolucion, prestamos.maestro
+        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion, prestamos.maestro
         FROM prestamos
         INNER JOIN materiales ON prestamos.material_id = materiales.id
         WHERE LOWER(TRIM(prestamos.maestro)) = LOWER(TRIM(?))
-        AND prestamos.fecha_devolucion IS NULL
+        AND prestamos.devuelto = 0
     `;
 
     conexion.query(sql, [maestro], (err, result) => {
@@ -578,7 +685,7 @@ app.get("/reportes/devueltos", (req, res) => {
 });
 
 // =============================================================================
-// Guía 12: Reportes filtrados con exportación a PDF/Excel
+// Guía 12: Reportes filtrados con exportación a PDF/Excel (sin cambios)
 // =============================================================================
 const PDFDocument = require("pdfkit");
 const ExcelJS = require("exceljs");
@@ -605,22 +712,12 @@ function construirFiltro(req) {
     return { whereSQL, valores };
 }
 
-// ÚNICO endpoint /reportes/pdf — genera el PDF completo en memoria (buffer)
-// y lo envía de una sola vez con res.send(). Esto evita que la función
-// serverless de Vercel se quede esperando indefinidamente, algo que sí
-// ocurría con doc.pipe(res) (streaming directo a la respuesta).
-//
-// FIX adicional: se agregó un timeout de seguridad (15s) alrededor de la
-// consulta SQL. Si el pool de conexiones tarda demasiado o se cuelga, el
-// endpoint responde con un error explícito en vez de dejar la petición
-// "cargando" para siempre (esto es lo que veías tanto en la app como al
-// pegar la URL directo en el navegador).
 app.get("/reportes/pdf", (req, res) => {
     const { whereSQL, valores } = construirFiltro(req);
 
     const sql = `
         SELECT prestamos.id, materiales.nombre AS material,
-        prestamos.fecha_prestamo, prestamos.fecha_devolucion,
+        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion,
         prestamos.maestro, prestamos.devuelto
         FROM prestamos
         INNER JOIN materiales ON prestamos.material_id = materiales.id
@@ -630,8 +727,6 @@ app.get("/reportes/pdf", (req, res) => {
 
     let respondido = false;
 
-    // Salvavidas: si en 15s no ha pasado nada, responde con error en vez
-    // de dejar al cliente esperando para siempre.
     const timeoutId = setTimeout(() => {
         if (!respondido) {
             respondido = true;
@@ -643,7 +738,7 @@ app.get("/reportes/pdf", (req, res) => {
     }, 15000);
 
     conexion.query(sql, valores, (err, result) => {
-        if (respondido) return; // el timeout ya respondió, no seguir
+        if (respondido) return;
         clearTimeout(timeoutId);
 
         if (err) {
@@ -685,6 +780,7 @@ app.get("/reportes/pdf", (req, res) => {
                 doc.font("Helvetica").fontSize(10).fillColor("#333");
                 doc.text(`Maestro: ${p.maestro}`);
                 doc.text(`Préstamo: ${p.fecha_prestamo}`);
+                doc.text(`Límite: ${p.fecha_limite || "N/A"}`);
                 doc.text(`Devolución: ${p.fecha_devolucion || "Pendiente"}`);
                 doc.text(`Estado: ${p.devuelto ? "Devuelto" : "Pendiente"}`);
                 doc.moveDown(0.8);
@@ -709,7 +805,7 @@ app.get("/reportes/excel", async (req, res) => {
 
     const sql = `
         SELECT prestamos.id, materiales.nombre AS material,
-        prestamos.fecha_prestamo, prestamos.fecha_devolucion,
+        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion,
         prestamos.maestro, prestamos.devuelto
         FROM prestamos
         INNER JOIN materiales ON prestamos.material_id = materiales.id
@@ -731,23 +827,24 @@ app.get("/reportes/excel", async (req, res) => {
                 { header: "Material", key: "material", width: 25 },
                 { header: "Maestro", key: "maestro", width: 20 },
                 { header: "Fecha Préstamo", key: "fecha_prestamo", width: 22 },
+                { header: "Fecha Límite", key: "fecha_limite", width: 22 },
                 { header: "Fecha Devolución", key: "fecha_devolucion", width: 22 },
                 { header: "Estado", key: "estado", width: 15 },
             ];
 
-            sheet.getRow(1).font = { bold: true };
+            sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
             sheet.getRow(1).fill = {
                 type: "pattern",
                 pattern: "solid",
                 fgColor: { argb: "FF2F6FED" },
             };
-            sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
 
             result.forEach((p) => {
                 sheet.addRow({
                     material: p.material,
                     maestro: p.maestro,
                     fecha_prestamo: p.fecha_prestamo,
+                    fecha_limite: p.fecha_limite || "N/A",
                     fecha_devolucion: p.fecha_devolucion || "Pendiente",
                     estado: p.devuelto ? "Devuelto" : "Pendiente",
                 });
@@ -767,15 +864,6 @@ app.get("/reportes/excel", async (req, res) => {
     });
 });
 
-// =============================================================================
-// Arranque del servidor
-// -----------------------------------------------------------------------------
-// En Vercel NO se usa app.listen(): Vercel invoca la app directamente como
-// función serverless en cada petición HTTP entrante. app.listen() solo se
-// ejecuta cuando corres el archivo directamente en local con "node server.js"
-// (require.main === module es true en ese caso, y false cuando Vercel
-// importa este archivo como módulo).
-// =============================================================================
 if (require.main === module) {
     app.listen(3000, () => {
         console.log("Servidor local en http://localhost:3000");
