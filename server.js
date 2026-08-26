@@ -296,11 +296,6 @@ app.post("/prestamos", (req, res) => {
         return;
     }
 
-    // Se usa LOWER(TRIM(...)) en ambos lados para que diferencias de
-    // mayúsculas o espacios entre el usuario logueado y el "maestro"
-    // guardado en la tabla permisos no provoquen un falso "sin permiso".
-    // También se acepta puede_prestar como 1, '1' o true (no solo TRUE),
-    // por si el valor llegó como texto desde algún cliente.
     const sqlPermiso = `
         SELECT * FROM permisos
         WHERE LOWER(TRIM(maestro)) = LOWER(TRIM(?))
@@ -384,8 +379,6 @@ app.put("/prestamos/devolver/:id", (req, res) => {
             });
         }
 
-        // Excepción: el maestro "juan" puede devolver cualquier material
-        // sin necesidad de tener un permiso asignado en la tabla permisos.
         const esMaestroSinRestriccion =
             maestro && maestro.toString().trim().toLowerCase() === "juan";
 
@@ -422,16 +415,6 @@ app.put("/prestamos/devolver/:id", (req, res) => {
 
 // =============================================================================
 // Guía 11: Devolución automática vía escaneo de QR.
-// -----------------------------------------------------------------------------
-// El maestro escanea el mismo QR del material que usó para el préstamo.
-// A diferencia de /prestamos/devolver/:id (que usa el ID del préstamo), este
-// endpoint recibe el ID del MATERIAL y busca el préstamo pendiente (devuelto
-// = 0) más reciente de ESE maestro para ese material. Esto es necesario
-// porque el QR pegado en el material solo contiene el material_id, no el id
-// del préstamo específico.
-//
-// También se valida puede_devolver, igual que el endpoint manual, para
-// mantener consistente el sistema de permisos de la Guía 10.
 // =============================================================================
 app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
     const materialId = req.params.material_id;
@@ -475,8 +458,6 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
         });
     }
 
-    // Excepción: el maestro "juan" puede devolver cualquier material sin
-    // necesidad de tener un permiso asignado en la tabla permisos.
     const esMaestroSinRestriccion =
         maestro && maestro.toString().trim().toLowerCase() === "juan";
 
@@ -588,6 +569,10 @@ function construirFiltro(req) {
     return { whereSQL, valores };
 }
 
+// ÚNICO endpoint /reportes/pdf — genera el PDF completo en memoria (buffer)
+// y lo envía de una sola vez con res.send(). Esto evita que la función
+// serverless de Vercel se quede esperando indefinidamente, algo que sí
+// ocurría con doc.pipe(res) (streaming directo a la respuesta).
 app.get("/reportes/pdf", (req, res) => {
     const { whereSQL, valores } = construirFiltro(req);
 
@@ -608,9 +593,21 @@ app.get("/reportes/pdf", (req, res) => {
         }
 
         const doc = new PDFDocument({ margin: 40 });
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", "attachment; filename=reporte.pdf");
-        doc.pipe(res);
+        const chunks = [];
+
+        doc.on("data", (chunk) => chunks.push(chunk));
+
+        doc.on("end", () => {
+            const pdfBuffer = Buffer.concat(chunks);
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader("Content-Disposition", "attachment; filename=reporte.pdf");
+            res.setHeader("Content-Length", pdfBuffer.length);
+            res.status(200).send(pdfBuffer);
+        });
+
+        doc.on("error", (errPdf) => {
+            res.status(500).json({ status: "error", mensaje: errPdf.message });
+        });
 
         doc.fontSize(18).text("Reporte de Préstamos - Inventario Escolar", { align: "center" });
         doc.moveDown();
