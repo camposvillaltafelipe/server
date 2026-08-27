@@ -2,6 +2,8 @@ const express = require("express");
 const mysql = require("mysql2");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 const { generarQRMateriales } = require("./generar_qr.js");
 
 const app = express();
@@ -10,7 +12,14 @@ app.use(bodyParser.json());
 app.use(cors());
 
 // =============================================================================
-// Pool de conexiones (igual que ya tenías, sin cambios).
+// Guía 13: clave secreta para firmar/verificar tokens JWT.
+// En un proyecto real esto iría en una variable de entorno, pero para el
+// curso se deja aquí como constante, igual que en la guía.
+// =============================================================================
+const SECRET = "clave_secreta_inventario";
+
+// =============================================================================
+// Pool de conexiones (sin cambios).
 // =============================================================================
 const conexion = mysql.createPool({
     host: "b7mbqylgdnfyz4tlqekm-mysql.services.clever-cloud.com",
@@ -39,16 +48,41 @@ app.get("/", (req, res) => {
 });
 
 // =============================================================================
-// FIX NECESARIO EN LA BASE DE DATOS (ejecutar una sola vez en tu MySQL):
+// Guía 13 — MIDDLEWARE de autenticación
 // -----------------------------------------------------------------------------
-// La tabla "prestamos" necesita una columna para guardar la fecha límite de
-// devolución (fecha_prestamo + 5 días). Sin esta columna no se puede saber
-// cuándo vence un préstamo.
+// Se usa en las rutas que quieras proteger. Lee el token del header
+// "Authorization", lo valida, y si es correcto continúa la petición dejando
+// disponible req.usuario = { usuario, rol } para la ruta siguiente.
 //
-//   ALTER TABLE prestamos ADD COLUMN fecha_limite DATETIME NULL;
-//
-// Si tu tabla "materiales" NO tiene ya una columna "cantidad" (sí la tiene,
-// según tu código original), no hace falta nada más ahí.
+// El Flutter envía el token así en cada petición protegida:
+//   headers: {"Authorization": token}
+// =============================================================================
+function verificarToken(req, res, next) {
+    const token = req.headers["authorization"];
+    if (!token) {
+        return res.status(401).json({ status: "error", mensaje: "Token requerido" });
+    }
+    jwt.verify(token, SECRET, (err, decoded) => {
+        if (err) {
+            return res.status(401).json({ status: "error", mensaje: "Token inválido o expirado" });
+        }
+        req.usuario = decoded;
+        next();
+    });
+}
+
+// Middleware adicional: solo deja pasar si el rol es "administrador".
+function soloAdmin(req, res, next) {
+    if (!req.usuario || req.usuario.rol !== "administrador") {
+        return res.status(403).json({ status: "error", mensaje: "Acceso denegado: solo administradores" });
+    }
+    next();
+}
+
+// =============================================================================
+// FIX NECESARIO EN LA BASE DE DATOS (ejecutar una sola vez, ver
+// guia13_ajuste_usuarios.sql):
+//   ALTER TABLE usuarios MODIFY COLUMN clave VARCHAR(255) NOT NULL;
 // =============================================================================
 
 app.get("/generar_qr", (req, res) => {
@@ -105,18 +139,88 @@ app.get("/materiales", (req, res) => {
     });
 });
 
+// =============================================================================
+// Guía 13 — REGISTRO de usuario con clave encriptada.
+// -----------------------------------------------------------------------------
+// Adaptado a TU esquema real: usuario (no correo), clave (no password),
+// rol = 'administrador' | 'maestro' (no 'admin').
+// =============================================================================
+app.post("/registro", (req, res) => {
+    const { usuario, clave, rol } = req.body;
+
+    if (!usuario || !clave || !rol) {
+        res.json({ status: "fail", mensaje: "Faltan datos: usuario, clave y rol son requeridos" });
+        return;
+    }
+
+    if (rol !== "administrador" && rol !== "maestro") {
+        res.json({ status: "fail", mensaje: "Rol inválido: debe ser 'administrador' o 'maestro'" });
+        return;
+    }
+
+    const claveEncriptada = bcrypt.hashSync(clave, 8);
+    const sql = "INSERT INTO usuarios (usuario, clave, rol) VALUES (?, ?, ?)";
+
+    conexion.query(sql, [usuario, claveEncriptada, rol], (err, result) => {
+        if (err) {
+            if (err.code === "ER_DUP_ENTRY") {
+                res.json({ status: "fail", mensaje: "Ese nombre de usuario ya existe" });
+            } else {
+                res.json({ status: "error", mensaje: err.message || err });
+            }
+        } else {
+            res.json({ status: "ok", mensaje: "Usuario registrado" });
+        }
+    });
+});
+
+// =============================================================================
+// Guía 13 — LOGIN con bcrypt + JWT.
+// -----------------------------------------------------------------------------
+// Reemplaza el login anterior (que comparaba la clave en texto plano).
+// Ahora compara el hash con bcrypt.compareSync y devuelve un token JWT válido
+// por 4 horas (suficiente para una jornada de clases).
+// =============================================================================
 app.post("/login", (req, res) => {
     const { usuario, clave } = req.body;
-    const sql = "SELECT * FROM usuarios WHERE usuario = ? AND clave = ?";
 
-    conexion.query(sql, [usuario, clave], (err, result) => {
+    if (!usuario || !clave) {
+        res.json({ status: "fail", mensaje: "Ingresa usuario y contraseña" });
+        return;
+    }
+
+    const sql = "SELECT * FROM usuarios WHERE usuario = ?";
+
+    conexion.query(sql, [usuario], (err, result) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
-        } else if (result.length > 0) {
-            res.json({ status: "ok", rol: result[0].rol });
-        } else {
-            res.json({ status: "fail", mensaje: "Credenciales incorrectas" });
+            res.json({ status: "error", mensaje: err.message || err });
+            return;
         }
+
+        if (result.length === 0) {
+            res.json({ status: "fail", mensaje: "Credenciales incorrectas" });
+            return;
+        }
+
+        const usuarioDb = result[0];
+        const claveValida = bcrypt.compareSync(clave, usuarioDb.clave);
+
+        if (!claveValida) {
+            res.json({ status: "fail", mensaje: "Credenciales incorrectas" });
+            return;
+        }
+
+        const token = jwt.sign(
+            { usuario: usuarioDb.usuario, rol: usuarioDb.rol },
+            SECRET,
+            { expiresIn: "4h" }
+        );
+
+        res.json({
+            status: "ok",
+            rol: usuarioDb.rol,
+            token: token
+        });
     });
 });
 
@@ -244,16 +348,7 @@ app.delete("/permisos/:id", (req, res) => {
 });
 
 // =============================================================================
-// FIX PRINCIPAL — POST /prestamos
-// -----------------------------------------------------------------------------
-// Ahora este endpoint, al registrar un préstamo:
-//   1) Verifica que el material tenga stock (cantidad > 0). Si no, rechaza.
-//   2) Calcula fecha_limite = fecha_prestamo + 5 días.
-//   3) Inserta el préstamo con fecha_prestamo (hora exacta del escaneo) y
-//      fecha_limite.
-//   4) Descuenta 1 unidad de materiales.cantidad.
-// Todo en una transacción para evitar inconsistencias si algo falla a mitad
-// de camino (p. ej. se inserta el préstamo pero no se descuenta el stock).
+// POST /prestamos — descuenta inventario y calcula fecha_limite (+5 días).
 // =============================================================================
 app.post("/prestamos", (req, res) => {
     const { material_id, fecha_prestamo, maestro } = req.body;
@@ -284,8 +379,6 @@ app.post("/prestamos", (req, res) => {
                     return;
                 }
 
-                // Bloquea la fila del material para evitar condiciones de
-                // carrera si dos escaneos llegan casi al mismo tiempo.
                 const sqlStock = "SELECT cantidad FROM materiales WHERE id = ? FOR UPDATE";
                 cn.query(sqlStock, [material_id], (errStock, resultStock) => {
                     if (errStock) {
@@ -409,8 +502,7 @@ app.get("/prestamos", (req, res) => {
 });
 
 // =============================================================================
-// FIX — Devolución manual por ID de préstamo (botón "Devolver" en Flutter).
-// Ahora también repone 1 unidad al inventario, en transacción.
+// Devolución manual por ID — repone inventario, en transacción.
 // =============================================================================
 app.put("/prestamos/devolver/:id", (req, res) => {
     const idPrestamo = req.params.id;
@@ -518,11 +610,7 @@ app.put("/prestamos/devolver/:id", (req, res) => {
 });
 
 // =============================================================================
-// FIX PRINCIPAL — PUT /prestamos/devolver-qr/:material_id
-// -----------------------------------------------------------------------------
-// Este es el endpoint que llama EscaneoQR en el SEGUNDO escaneo. Ahora también
-// repone 1 unidad al inventario dentro de una transacción, además de marcar
-// el préstamo como devuelto (igual que antes).
+// Devolución vía escaneo QR (segundo escaneo) — repone inventario.
 // =============================================================================
 app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
     const materialId = req.params.material_id;
@@ -660,7 +748,14 @@ app.get("/notificaciones/:maestro", (req, res) => {
     });
 });
 
-app.get("/reportes/total", (req, res) => {
+// =============================================================================
+// Guía 13 — Rutas protegidas de ejemplo, tal como pide la guía:
+//   "el administrador accede a funciones avanzadas (reportes, permisos)"
+// Se protegen los reportes agregados con verificarToken + soloAdmin.
+// Si tu Flutter aún no envía el header Authorization en estas rutas, estas
+// llamadas devolverán 401; más abajo se explica cómo lo hace el nuevo main.dart.
+// =============================================================================
+app.get("/reportes/total", verificarToken, soloAdmin, (req, res) => {
     const sql = "SELECT COUNT(*) AS total FROM prestamos";
     conexion.query(sql, (err, result) => {
         if (err) res.json({ status: "error", mensaje: err });
@@ -668,7 +763,7 @@ app.get("/reportes/total", (req, res) => {
     });
 });
 
-app.get("/reportes/pendientes", (req, res) => {
+app.get("/reportes/pendientes", verificarToken, soloAdmin, (req, res) => {
     const sql = "SELECT COUNT(*) AS pendientes FROM prestamos WHERE devuelto = 0";
     conexion.query(sql, (err, result) => {
         if (err) res.json({ status: "error", mensaje: err });
@@ -676,7 +771,7 @@ app.get("/reportes/pendientes", (req, res) => {
     });
 });
 
-app.get("/reportes/devueltos", (req, res) => {
+app.get("/reportes/devueltos", verificarToken, soloAdmin, (req, res) => {
     const sql = "SELECT COUNT(*) AS devueltos FROM prestamos WHERE devuelto = 1";
     conexion.query(sql, (err, result) => {
         if (err) res.json({ status: "error", mensaje: err });
@@ -685,7 +780,8 @@ app.get("/reportes/devueltos", (req, res) => {
 });
 
 // =============================================================================
-// Guía 12: Reportes filtrados con exportación a PDF/Excel (sin cambios)
+// Guía 12: Reportes filtrados con exportación a PDF/Excel — también
+// protegidos, solo administrador.
 // =============================================================================
 const PDFDocument = require("pdfkit");
 const ExcelJS = require("exceljs");
@@ -712,7 +808,7 @@ function construirFiltro(req) {
     return { whereSQL, valores };
 }
 
-app.get("/reportes/pdf", (req, res) => {
+app.get("/reportes/pdf", verificarToken, soloAdmin, (req, res) => {
     const { whereSQL, valores } = construirFiltro(req);
 
     const sql = `
@@ -800,7 +896,7 @@ app.get("/reportes/pdf", (req, res) => {
     });
 });
 
-app.get("/reportes/excel", async (req, res) => {
+app.get("/reportes/excel", verificarToken, soloAdmin, async (req, res) => {
     const { whereSQL, valores } = construirFiltro(req);
 
     const sql = `
@@ -862,6 +958,17 @@ app.get("/reportes/excel", async (req, res) => {
             res.status(500).json({ status: "error", mensaje: errGen.message || String(errGen) });
         }
     });
+});
+
+// =============================================================================
+// Guía 13 — Endpoint de ejemplo protegido, tal como muestra la guía:
+//   GET /admin/reportes → solo accesible con token de administrador.
+// =============================================================================
+app.get("/admin/reportes", verificarToken, (req, res) => {
+    if (req.usuario.rol !== "administrador") {
+        return res.status(403).json({ status: "error", mensaje: "Acceso denegado" });
+    }
+    res.json({ status: "ok", mensaje: `Bienvenido administrador ${req.usuario.usuario}` });
 });
 
 if (require.main === module) {
