@@ -971,6 +971,32 @@ app.get("/admin/reportes", verificarToken, (req, res) => {
     res.json({ status: "ok", mensaje: `Bienvenido administrador ${req.usuario.usuario}` });
 });
 
+app.get("/dashboard", verificarToken, soloAdmin, (req, res) => {
+    const sql = `
+        SELECT
+            (SELECT COUNT(*) FROM materiales) AS total_materiales,
+            (SELECT COUNT(*) FROM prestamos WHERE devuelto = 0) AS prestados,
+            (SELECT COUNT(*) FROM prestamos WHERE devuelto = 1) AS devueltos,
+            (SELECT COUNT(*) FROM materiales WHERE estado = 'Dañado') AS danados
+    `;
+
+    conexion.query(sql, (err, result) => {
+        if (err) {
+            res.status(500).json({ status: "error", mensaje: err.message || err });
+            return;
+        }
+
+        const fila = result[0] || {};
+        res.json({
+            status: "ok",
+            total_materiales: fila.total_materiales ?? 0,
+            prestados: fila.prestados ?? 0,
+            devueltos: fila.devueltos ?? 0,
+            danados: fila.danados ?? 0
+        });
+    });
+});
+
 if (require.main === module) {
     app.listen(3000, () => {
         console.log("Servidor local en http://localhost:3000");
