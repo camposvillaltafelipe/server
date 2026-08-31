@@ -997,6 +997,46 @@ app.get("/dashboard", verificarToken, soloAdmin, (req, res) => {
     });
 });
 
+app.get("/prestamos", (req, res) => {
+    const sql = `
+        SELECT prestamos.id, prestamos.material_id, materiales.nombre AS material,
+        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion,
+        prestamos.maestro, prestamos.devuelto
+        FROM prestamos
+        INNER JOIN materiales ON prestamos.material_id = materiales.id
+        WHERE prestamos.devuelto = 0
+        ORDER BY prestamos.fecha_prestamo DESC
+    `;
+    conexion.query(sql, (err, result) => {
+        if (err) return res.json({ status: "error", mensaje: err });
+        res.json(result);
+    });
+});
+
+app.get("/permisos", (req, res) => {
+    const sql = `
+        SELECT permisos.id, permisos.maestro, permisos.material_id,
+        materiales.nombre AS material, usuarios.rol AS rol_maestro,
+        permisos.puede_ver, permisos.puede_prestar, permisos.puede_devolver
+        FROM permisos
+        INNER JOIN materiales ON permisos.material_id = materiales.id
+        INNER JOIN usuarios ON LOWER(TRIM(permisos.maestro)) = LOWER(TRIM(usuarios.usuario))
+        ORDER BY permisos.maestro, materiales.nombre
+    `;
+    conexion.query(sql, (err, result) => {
+        if (err) return res.json({ status: "error", mensaje: err });
+        res.json(result);
+    });
+});
+
+app.get("/maestros", (req, res) => {
+    const sql = "SELECT usuario, rol FROM usuarios WHERE rol = 'maestro'";
+    conexion.query(sql, (err, result) => {
+        if (err) return res.json({ status: "error", mensaje: err });
+        res.json(result);
+    });
+});
+
 if (require.main === module) {
     app.listen(3000, () => {
         console.log("Servidor local en http://localhost:3000");
