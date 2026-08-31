@@ -11,16 +11,8 @@ const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
-// =============================================================================
-// Guía 13: clave secreta para firmar/verificar tokens JWT.
-// En un proyecto real esto iría en una variable de entorno, pero para el
-// curso se deja aquí como constante, igual que en la guía.
-// =============================================================================
 const SECRET = "clave_secreta_inventario";
 
-// =============================================================================
-// Pool de conexiones (sin cambios).
-// =============================================================================
 const conexion = mysql.createPool({
     host: "b7mbqylgdnfyz4tlqekm-mysql.services.clever-cloud.com",
     user: "uea1zze9enn2xxe4",
@@ -47,16 +39,6 @@ app.get("/", (req, res) => {
     res.send("Bienvenido a Inventario API");
 });
 
-// =============================================================================
-// Guía 13 — MIDDLEWARE de autenticación
-// -----------------------------------------------------------------------------
-// Se usa en las rutas que quieras proteger. Lee el token del header
-// "Authorization", lo valida, y si es correcto continúa la petición dejando
-// disponible req.usuario = { usuario, rol } para la ruta siguiente.
-//
-// El Flutter envía el token así en cada petición protegida:
-//   headers: {"Authorization": token}
-// =============================================================================
 function verificarToken(req, res, next) {
     const token = req.headers["authorization"];
     if (!token) {
@@ -71,7 +53,6 @@ function verificarToken(req, res, next) {
     });
 }
 
-// Middleware adicional: solo deja pasar si el rol es "administrador".
 function soloAdmin(req, res, next) {
     if (!req.usuario || req.usuario.rol !== "administrador") {
         return res.status(403).json({ status: "error", mensaje: "Acceso denegado: solo administradores" });
@@ -79,16 +60,10 @@ function soloAdmin(req, res, next) {
     next();
 }
 
-// =============================================================================
-// FIX NECESARIO EN LA BASE DE DATOS (ejecutar una sola vez, ver
-// guia13_ajuste_usuarios.sql):
-//   ALTER TABLE usuarios MODIFY COLUMN clave VARCHAR(255) NOT NULL;
-// =============================================================================
-
 app.get("/generar_qr", (req, res) => {
     conexion.query("SELECT id, nombre FROM materiales", (err, materiales) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -111,39 +86,8 @@ app.get("/generar_qr", (req, res) => {
     });
 });
 
-app.post("/materiales", (req, res) => {
-    const { nombre, cantidad, estado } = req.body;
-
-    const sql = `
-        INSERT INTO materiales (nombre, cantidad, estado)
-        VALUES (?, ?, ?)
-    `;
-
-    conexion.query(sql, [nombre, cantidad, estado], (err, result) => {
-        if (err) {
-            res.json({ status: "error", mensaje: err });
-        } else {
-            res.json({ status: "ok", mensaje: "Material registrado" });
-        }
-    });
-});
-
-app.get("/materiales", (req, res) => {
-    const sql = "SELECT id, nombre, cantidad, estado FROM materiales";
-    conexion.query(sql, (err, result) => {
-        if (err) {
-            res.json({ status: "error", mensaje: err });
-        } else {
-            res.json(result);
-        }
-    });
-});
-
 // =============================================================================
-// Guía 13 — REGISTRO de usuario con clave encriptada.
-// -----------------------------------------------------------------------------
-// Adaptado a TU esquema real: usuario (no correo), clave (no password),
-// rol = 'administrador' | 'maestro' (no 'admin').
+// Guía 13 — REGISTRO
 // =============================================================================
 app.post("/registro", (req, res) => {
     const { usuario, clave, rol } = req.body;
@@ -166,7 +110,7 @@ app.post("/registro", (req, res) => {
             if (err.code === "ER_DUP_ENTRY") {
                 res.json({ status: "fail", mensaje: "Ese nombre de usuario ya existe" });
             } else {
-                res.json({ status: "error", mensaje: err.message || err });
+                res.json({ status: "error", mensaje: err.message || String(err) });
             }
         } else {
             res.json({ status: "ok", mensaje: "Usuario registrado" });
@@ -175,11 +119,7 @@ app.post("/registro", (req, res) => {
 });
 
 // =============================================================================
-// Guía 13 — LOGIN con bcrypt + JWT.
-// -----------------------------------------------------------------------------
-// Reemplaza el login anterior (que comparaba la clave en texto plano).
-// Ahora compara el hash con bcrypt.compareSync y devuelve un token JWT válido
-// por 4 horas (suficiente para una jornada de clases).
+// Guía 13 — LOGIN
 // =============================================================================
 app.post("/login", (req, res) => {
     const { usuario, clave } = req.body;
@@ -193,7 +133,7 @@ app.post("/login", (req, res) => {
 
     conexion.query(sql, [usuario], (err, result) => {
         if (err) {
-            res.json({ status: "error", mensaje: err.message || err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -225,20 +165,16 @@ app.post("/login", (req, res) => {
 });
 
 app.get("/maestros", (req, res) => {
-    const sql = "SELECT usuario FROM usuarios WHERE rol = 'maestro'";
+    const sql = "SELECT usuario, rol FROM usuarios WHERE rol = 'maestro'";
     conexion.query(sql, (err, result) => {
-        if (err) {
-            res.json({ status: "error", mensaje: err });
-        } else {
-            res.json(result);
-        }
+        if (err) return res.json({ status: "error", mensaje: err.message || String(err) });
+        res.json(result);
     });
 });
 
 // =============================================================================
-// Guía 10: Roles avanzados y permisos (sin cambios respecto a tu versión)
+// Permisos (Guía 10 / 15)
 // =============================================================================
-
 app.post("/permisos", (req, res) => {
     const { maestro, material_id, puede_ver, puede_prestar, puede_devolver } = req.body;
 
@@ -251,7 +187,7 @@ app.post("/permisos", (req, res) => {
 
     conexion.query(sqlBuscar, [maestro, material_id], (err, result) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -266,7 +202,7 @@ app.post("/permisos", (req, res) => {
                 [puede_ver, puede_prestar, puede_devolver, maestro, material_id],
                 (err2) => {
                     if (err2) {
-                        res.json({ status: "error", mensaje: err2 });
+                        res.json({ status: "error", mensaje: err2.message || String(err2) });
                     } else {
                         res.json({ status: "ok", mensaje: "Permiso actualizado" });
                     }
@@ -282,7 +218,7 @@ app.post("/permisos", (req, res) => {
                 [maestro, material_id, puede_ver, puede_prestar, puede_devolver],
                 (err2) => {
                     if (err2) {
-                        res.json({ status: "error", mensaje: err2 });
+                        res.json({ status: "error", mensaje: err2.message || String(err2) });
                     } else {
                         res.json({ status: "ok", mensaje: "Permiso asignado" });
                     }
@@ -295,44 +231,16 @@ app.post("/permisos", (req, res) => {
 app.get("/permisos", (req, res) => {
     const sql = `
         SELECT permisos.id, permisos.maestro, permisos.material_id,
-        materiales.nombre AS material, permisos.puede_ver,
-        permisos.puede_prestar, permisos.puede_devolver
+        materiales.nombre AS material, usuarios.rol AS rol_maestro,
+        permisos.puede_ver, permisos.puede_prestar, permisos.puede_devolver
         FROM permisos
         INNER JOIN materiales ON permisos.material_id = materiales.id
+        INNER JOIN usuarios ON LOWER(TRIM(permisos.maestro)) = LOWER(TRIM(usuarios.usuario))
         ORDER BY permisos.maestro, materiales.nombre
     `;
     conexion.query(sql, (err, result) => {
-        if (err) {
-            res.json({ status: "error", mensaje: err });
-        } else {
-            res.json(result);
-        }
-    });
-});
-
-app.get("/debug/permisos", (req, res) => {
-    const sql = `
-        SELECT permisos.id, permisos.maestro, permisos.material_id,
-        materiales.nombre AS material, permisos.puede_ver,
-        permisos.puede_prestar, permisos.puede_devolver
-        FROM permisos
-        INNER JOIN materiales ON permisos.material_id = materiales.id
-    `;
-    conexion.query(sql, (err, result) => {
-        if (err) {
-            res.json({ status: "error", mensaje: err });
-            return;
-        }
-        const detalle = result.map(p => ({
-            id: p.id,
-            maestro_exacto: `[${p.maestro}]`,
-            material_id: p.material_id,
-            material: p.material,
-            puede_ver: `${p.puede_ver} (tipo: ${typeof p.puede_ver})`,
-            puede_prestar: `${p.puede_prestar} (tipo: ${typeof p.puede_prestar})`,
-            puede_devolver: `${p.puede_devolver} (tipo: ${typeof p.puede_devolver})`,
-        }));
-        res.json(detalle);
+        if (err) return res.json({ status: "error", mensaje: err.message || String(err) });
+        res.json(result);
     });
 });
 
@@ -340,7 +248,7 @@ app.delete("/permisos/:id", (req, res) => {
     const sql = "DELETE FROM permisos WHERE id = ?";
     conexion.query(sql, [req.params.id], (err) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
         } else {
             res.json({ status: "ok", mensaje: "Permiso eliminado" });
         }
@@ -348,7 +256,7 @@ app.delete("/permisos/:id", (req, res) => {
 });
 
 // =============================================================================
-// POST /prestamos — descuenta inventario y calcula fecha_limite (+5 días).
+// Préstamos
 // =============================================================================
 app.post("/prestamos", (req, res) => {
     const { material_id, fecha_prestamo, maestro } = req.body;
@@ -368,14 +276,14 @@ app.post("/prestamos", (req, res) => {
     function continuarConPermisoValidado() {
         conexion.getConnection((errConn, cn) => {
             if (errConn) {
-                res.json({ status: "error", mensaje: errConn.message || errConn });
+                res.json({ status: "error", mensaje: errConn.message || String(errConn) });
                 return;
             }
 
             cn.beginTransaction((errTx) => {
                 if (errTx) {
                     cn.release();
-                    res.json({ status: "error", mensaje: errTx.message || errTx });
+                    res.json({ status: "error", mensaje: errTx.message || String(errTx) });
                     return;
                 }
 
@@ -384,7 +292,7 @@ app.post("/prestamos", (req, res) => {
                     if (errStock) {
                         return cn.rollback(() => {
                             cn.release();
-                            res.json({ status: "error", mensaje: errStock.message || errStock });
+                            res.json({ status: "error", mensaje: errStock.message || String(errStock) });
                         });
                     }
 
@@ -415,7 +323,7 @@ app.post("/prestamos", (req, res) => {
                             if (errInsert) {
                                 return cn.rollback(() => {
                                     cn.release();
-                                    res.json({ status: "error", mensaje: errInsert.message || errInsert });
+                                    res.json({ status: "error", mensaje: errInsert.message || String(errInsert) });
                                 });
                             }
 
@@ -424,7 +332,7 @@ app.post("/prestamos", (req, res) => {
                                 if (errUpdate) {
                                     return cn.rollback(() => {
                                         cn.release();
-                                        res.json({ status: "error", mensaje: errUpdate.message || errUpdate });
+                                        res.json({ status: "error", mensaje: errUpdate.message || String(errUpdate) });
                                     });
                                 }
 
@@ -432,7 +340,7 @@ app.post("/prestamos", (req, res) => {
                                     if (errCommit) {
                                         return cn.rollback(() => {
                                             cn.release();
-                                            res.json({ status: "error", mensaje: errCommit.message || errCommit });
+                                            res.json({ status: "error", mensaje: errCommit.message || String(errCommit) });
                                         });
                                     }
 
@@ -452,7 +360,6 @@ app.post("/prestamos", (req, res) => {
     }
 
     if (esMaestroSinRestriccion) {
-        console.log(`[prestamos] "${maestro}" es maestro sin restricción — se omite validación de permiso`);
         continuarConPermisoValidado();
         return;
     }
@@ -466,11 +373,9 @@ app.post("/prestamos", (req, res) => {
 
     conexion.query(sqlPermiso, [maestro, material_id], (err, result) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
-
-        console.log(`[prestamos] Verificando permiso -> maestro: "${maestro}", material_id: ${material_id}, resultado: ${result.length} fila(s)`);
 
         if (result.length === 0) {
             res.json({ status: "fail", mensaje: "No tienes permiso para prestar este material" });
@@ -494,16 +399,13 @@ app.get("/prestamos", (req, res) => {
 
     conexion.query(sql, (err, result) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
         } else {
             res.json(result);
         }
     });
 });
 
-// =============================================================================
-// Devolución manual por ID — repone inventario, en transacción.
-// =============================================================================
 app.put("/prestamos/devolver/:id", (req, res) => {
     const idPrestamo = req.params.id;
 
@@ -511,7 +413,7 @@ app.put("/prestamos/devolver/:id", (req, res) => {
 
     conexion.query(sqlPrestamo, [idPrestamo], (err, resultPrestamo) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -530,14 +432,14 @@ app.put("/prestamos/devolver/:id", (req, res) => {
         function marcarDevueltoYReponer() {
             conexion.getConnection((errConn, cn) => {
                 if (errConn) {
-                    res.json({ status: "error", mensaje: errConn.message || errConn });
+                    res.json({ status: "error", mensaje: errConn.message || String(errConn) });
                     return;
                 }
 
                 cn.beginTransaction((errTx) => {
                     if (errTx) {
                         cn.release();
-                        res.json({ status: "error", mensaje: errTx.message || errTx });
+                        res.json({ status: "error", mensaje: errTx.message || String(errTx) });
                         return;
                     }
 
@@ -546,7 +448,7 @@ app.put("/prestamos/devolver/:id", (req, res) => {
                         if (err3) {
                             return cn.rollback(() => {
                                 cn.release();
-                                res.json({ status: "error", mensaje: err3.message || err3 });
+                                res.json({ status: "error", mensaje: err3.message || String(err3) });
                             });
                         }
 
@@ -555,7 +457,7 @@ app.put("/prestamos/devolver/:id", (req, res) => {
                             if (err4) {
                                 return cn.rollback(() => {
                                     cn.release();
-                                    res.json({ status: "error", mensaje: err4.message || err4 });
+                                    res.json({ status: "error", mensaje: err4.message || String(err4) });
                                 });
                             }
 
@@ -563,7 +465,7 @@ app.put("/prestamos/devolver/:id", (req, res) => {
                                 if (errCommit) {
                                     return cn.rollback(() => {
                                         cn.release();
-                                        res.json({ status: "error", mensaje: errCommit.message || errCommit });
+                                        res.json({ status: "error", mensaje: errCommit.message || String(errCommit) });
                                     });
                                 }
                                 cn.release();
@@ -579,7 +481,6 @@ app.put("/prestamos/devolver/:id", (req, res) => {
             maestro && maestro.toString().trim().toLowerCase() === "juan";
 
         if (esMaestroSinRestriccion) {
-            console.log(`[prestamos/devolver] "${maestro}" es maestro sin restricción — se omite validación de permiso`);
             marcarDevueltoYReponer();
             return;
         }
@@ -593,11 +494,9 @@ app.put("/prestamos/devolver/:id", (req, res) => {
 
         conexion.query(sqlPermiso, [maestro, material_id], (err2, resultPermiso) => {
             if (err2) {
-                res.json({ status: "error", mensaje: err2 });
+                res.json({ status: "error", mensaje: err2.message || String(err2) });
                 return;
             }
-
-            console.log(`[prestamos/devolver] Verificando permiso -> maestro: "${maestro}", material_id: ${material_id}, resultado: ${resultPermiso.length} fila(s)`);
 
             if (resultPermiso.length === 0) {
                 res.json({ status: "fail", mensaje: "No tienes permiso para devolver este material" });
@@ -609,9 +508,6 @@ app.put("/prestamos/devolver/:id", (req, res) => {
     });
 });
 
-// =============================================================================
-// Devolución vía escaneo QR (segundo escaneo) — repone inventario.
-// =============================================================================
 app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
     const materialId = req.params.material_id;
     const { maestro } = req.body;
@@ -633,7 +529,7 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
 
         conexion.query(sqlBuscarPrestamo, [materialId, maestro], (err2, resultPrestamo) => {
             if (err2) {
-                res.json({ status: "error", mensaje: err2 });
+                res.json({ status: "error", mensaje: err2.message || String(err2) });
                 return;
             }
 
@@ -646,14 +542,14 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
 
             conexion.getConnection((errConn, cn) => {
                 if (errConn) {
-                    res.json({ status: "error", mensaje: errConn.message || errConn });
+                    res.json({ status: "error", mensaje: errConn.message || String(errConn) });
                     return;
                 }
 
                 cn.beginTransaction((errTx) => {
                     if (errTx) {
                         cn.release();
-                        res.json({ status: "error", mensaje: errTx.message || errTx });
+                        res.json({ status: "error", mensaje: errTx.message || String(errTx) });
                         return;
                     }
 
@@ -662,7 +558,7 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
                         if (err3) {
                             return cn.rollback(() => {
                                 cn.release();
-                                res.json({ status: "error", mensaje: err3.message || err3 });
+                                res.json({ status: "error", mensaje: err3.message || String(err3) });
                             });
                         }
 
@@ -671,7 +567,7 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
                             if (err4) {
                                 return cn.rollback(() => {
                                     cn.release();
-                                    res.json({ status: "error", mensaje: err4.message || err4 });
+                                    res.json({ status: "error", mensaje: err4.message || String(err4) });
                                 });
                             }
 
@@ -679,7 +575,7 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
                                 if (errCommit) {
                                     return cn.rollback(() => {
                                         cn.release();
-                                        res.json({ status: "error", mensaje: errCommit.message || errCommit });
+                                        res.json({ status: "error", mensaje: errCommit.message || String(errCommit) });
                                     });
                                 }
                                 cn.release();
@@ -696,7 +592,6 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
         maestro && maestro.toString().trim().toLowerCase() === "juan";
 
     if (esMaestroSinRestriccion) {
-        console.log(`[prestamos/devolver-qr] "${maestro}" es maestro sin restricción — se omite validación de permiso`);
         buscarYDevolverPrestamo();
         return;
     }
@@ -710,11 +605,9 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
 
     conexion.query(sqlPermiso, [maestro, materialId], (err, resultPermiso) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
-
-        console.log(`[prestamos/devolver-qr] Verificando permiso -> maestro: "${maestro}", material_id: ${materialId}, resultado: ${resultPermiso.length} fila(s)`);
 
         if (resultPermiso.length === 0) {
             res.json({ status: "fail", mensaje: "No tienes permiso para devolver este material" });
@@ -727,7 +620,6 @@ app.put("/prestamos/devolver-qr/:material_id", (req, res) => {
 
 app.get("/notificaciones/:maestro", (req, res) => {
     const maestro = req.params.maestro.trim();
-    console.log(`[notificaciones] Consultando pendientes para maestro: "${maestro}"`);
 
     const sql = `
         SELECT prestamos.id, materiales.nombre AS material,
@@ -740,25 +632,20 @@ app.get("/notificaciones/:maestro", (req, res) => {
 
     conexion.query(sql, [maestro], (err, result) => {
         if (err) {
-            res.json({ status: "error", mensaje: err });
+            res.json({ status: "error", mensaje: err.message || String(err) });
         } else {
-            console.log(`[notificaciones] ${result.length} pendiente(s) encontrados`);
             res.json(result);
         }
     });
 });
 
 // =============================================================================
-// Guía 13 — Rutas protegidas de ejemplo, tal como pide la guía:
-//   "el administrador accede a funciones avanzadas (reportes, permisos)"
-// Se protegen los reportes agregados con verificarToken + soloAdmin.
-// Si tu Flutter aún no envía el header Authorization en estas rutas, estas
-// llamadas devolverán 401; más abajo se explica cómo lo hace el nuevo main.dart.
+// Reportes protegidos
 // =============================================================================
 app.get("/reportes/total", verificarToken, soloAdmin, (req, res) => {
     const sql = "SELECT COUNT(*) AS total FROM prestamos";
     conexion.query(sql, (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err });
+        if (err) res.json({ status: "error", mensaje: err.message || String(err) });
         else res.json(result[0]);
     });
 });
@@ -766,7 +653,7 @@ app.get("/reportes/total", verificarToken, soloAdmin, (req, res) => {
 app.get("/reportes/pendientes", verificarToken, soloAdmin, (req, res) => {
     const sql = "SELECT COUNT(*) AS pendientes FROM prestamos WHERE devuelto = 0";
     conexion.query(sql, (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err });
+        if (err) res.json({ status: "error", mensaje: err.message || String(err) });
         else res.json(result[0]);
     });
 });
@@ -774,15 +661,11 @@ app.get("/reportes/pendientes", verificarToken, soloAdmin, (req, res) => {
 app.get("/reportes/devueltos", verificarToken, soloAdmin, (req, res) => {
     const sql = "SELECT COUNT(*) AS devueltos FROM prestamos WHERE devuelto = 1";
     conexion.query(sql, (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err });
+        if (err) res.json({ status: "error", mensaje: err.message || String(err) });
         else res.json(result[0]);
     });
 });
 
-// =============================================================================
-// Guía 12: Reportes filtrados con exportación a PDF/Excel — también
-// protegidos, solo administrador.
-// =============================================================================
 const PDFDocument = require("pdfkit");
 const ExcelJS = require("exceljs");
 
@@ -839,7 +722,7 @@ app.get("/reportes/pdf", verificarToken, soloAdmin, (req, res) => {
 
         if (err) {
             respondido = true;
-            res.status(500).json({ status: "error", mensaje: err.message || err });
+            res.status(500).json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -911,7 +794,7 @@ app.get("/reportes/excel", verificarToken, soloAdmin, async (req, res) => {
 
     conexion.query(sql, valores, async (err, result) => {
         if (err) {
-            res.status(500).json({ status: "error", mensaje: err });
+            res.status(500).json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -960,10 +843,6 @@ app.get("/reportes/excel", verificarToken, soloAdmin, async (req, res) => {
     });
 });
 
-// =============================================================================
-// Guía 13 — Endpoint de ejemplo protegido, tal como muestra la guía:
-//   GET /admin/reportes → solo accesible con token de administrador.
-// =============================================================================
 app.get("/admin/reportes", verificarToken, (req, res) => {
     if (req.usuario.rol !== "administrador") {
         return res.status(403).json({ status: "error", mensaje: "Acceso denegado" });
@@ -982,7 +861,7 @@ app.get("/dashboard", verificarToken, soloAdmin, (req, res) => {
 
     conexion.query(sql, (err, result) => {
         if (err) {
-            res.status(500).json({ status: "error", mensaje: err.message || err });
+            res.status(500).json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
 
@@ -997,124 +876,127 @@ app.get("/dashboard", verificarToken, soloAdmin, (req, res) => {
     });
 });
 
-app.get("/prestamos", (req, res) => {
-    const sql = `
-        SELECT prestamos.id, prestamos.material_id, materiales.nombre AS material,
-        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion,
-        prestamos.maestro, prestamos.devuelto
-        FROM prestamos
-        INNER JOIN materiales ON prestamos.material_id = materiales.id
-        WHERE prestamos.devuelto = 0
-        ORDER BY prestamos.fecha_prestamo DESC
-    `;
-    conexion.query(sql, (err, result) => {
-        if (err) return res.json({ status: "error", mensaje: err });
-        res.json(result);
-    });
-});
-
-app.get("/permisos", (req, res) => {
-    const sql = `
-        SELECT permisos.id, permisos.maestro, permisos.material_id,
-        materiales.nombre AS material, usuarios.rol AS rol_maestro,
-        permisos.puede_ver, permisos.puede_prestar, permisos.puede_devolver
-        FROM permisos
-        INNER JOIN materiales ON permisos.material_id = materiales.id
-        INNER JOIN usuarios ON LOWER(TRIM(permisos.maestro)) = LOWER(TRIM(usuarios.usuario))
-        ORDER BY permisos.maestro, materiales.nombre
-    `;
-    conexion.query(sql, (err, result) => {
-        if (err) return res.json({ status: "error", mensaje: err });
-        res.json(result);
-    });
-});
-
-app.get("/maestros", (req, res) => {
-    const sql = "SELECT usuario, rol FROM usuarios WHERE rol = 'maestro'";
-    conexion.query(sql, (err, result) => {
-        if (err) return res.json({ status: "error", mensaje: err });
-        res.json(result);
-    });
-});
-
 // =============================================================================
-// Guía 16 — Subida de fotos con multer (memoria, sin disco) + categoría
+// Guía 16 — Materiales con foto (base64, sin filesystem) y categoría
 // -----------------------------------------------------------------------------
-// Vercel tiene el filesystem de solo lectura, así que NO se puede usar
-// multer.diskStorage guardando en "uploads/". En su lugar usamos
-// memoryStorage y guardamos la imagen como Base64 en la base de datos.
+// FIX: se cambió multer.diskStorage/dest a memoryStorage (Vercel es
+// read-only). También se envuelve el manejo de multer en un middleware
+// propio para capturar errores (ej. archivo demasiado grande) y responder
+// SIEMPRE en JSON, nunca dejar que Express devuelva su página HTML de error.
 // =============================================================================
 const multer = require("multer");
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB máx, ajusta si lo necesitas
+});
+
+function subirFotoMiddleware(req, res, next) {
+    upload.single("foto")(req, res, (err) => {
+        if (err) {
+            // Cualquier error de multer (archivo muy grande, campo mal
+            // nombrado, etc.) se responde en JSON, nunca como HTML.
+            return res.status(400).json({
+                status: "error",
+                mensaje: "Error al procesar la imagen: " + (err.message || String(err))
+            });
+        }
+        next();
+    });
+}
 
 app.get("/materiales", (req, res) => {
     const sql = "SELECT id, nombre, cantidad, estado, categoria, foto FROM materiales";
     conexion.query(sql, (err, result) => {
         if (err) {
-            res.status(500).json({ status: "error", mensaje: err.message || err });
+            res.status(500).json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
         res.json(result);
     });
 });
 
-app.post("/materiales", verificarToken, soloAdmin, upload.single("foto"), (req, res) => {
-    const { nombre, cantidad, estado, categoria } = req.body;
+app.post("/materiales", verificarToken, soloAdmin, subirFotoMiddleware, (req, res) => {
+    try {
+        const { nombre, cantidad, estado, categoria } = req.body;
 
-    if (!nombre || !cantidad || !estado) {
-        res.status(400).json({ status: "fail", mensaje: "Faltan datos obligatorios" });
-        return;
-    }
-
-    let fotoBase64 = null;
-    if (req.file) {
-        fotoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
-    }
-
-    const sql = "INSERT INTO materiales (nombre, cantidad, estado, categoria, foto) VALUES (?, ?, ?, ?, ?)";
-    conexion.query(sql, [nombre, cantidad, estado, categoria || null, fotoBase64], (err, result) => {
-        if (err) {
-            res.status(500).json({ status: "error", mensaje: err.message || err });
+        if (!nombre || !cantidad || !estado) {
+            res.status(400).json({ status: "fail", mensaje: "Faltan datos obligatorios" });
             return;
         }
-        res.json({ status: "ok", mensaje: "Material agregado con foto y categoría" });
-    });
+
+        let fotoBase64 = null;
+        if (req.file) {
+            fotoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+        }
+
+        const sql = "INSERT INTO materiales (nombre, cantidad, estado, categoria, foto) VALUES (?, ?, ?, ?, ?)";
+        conexion.query(sql, [nombre, cantidad, estado, categoria || null, fotoBase64], (err, result) => {
+            if (err) {
+                // Si la columna categoria/foto no existe todavía en tu tabla real,
+                // este es el error más probable (ER_BAD_FIELD_ERROR).
+                res.status(500).json({ status: "error", mensaje: err.message || String(err) });
+                return;
+            }
+            res.json({ status: "ok", mensaje: "Material agregado con foto y categoría" });
+        });
+    } catch (errGen) {
+        res.status(500).json({ status: "error", mensaje: errGen.message || String(errGen) });
+    }
 });
 
-app.put("/materiales/:id", verificarToken, soloAdmin, upload.single("foto"), (req, res) => {
-    const { nombre, cantidad, estado, categoria } = req.body;
-    const id = req.params.id;
+app.put("/materiales/:id", verificarToken, soloAdmin, subirFotoMiddleware, (req, res) => {
+    try {
+        const { nombre, cantidad, estado, categoria } = req.body;
+        const id = req.params.id;
 
-    let sql = "UPDATE materiales SET nombre=?, cantidad=?, estado=?, categoria=?";
-    let valores = [nombre, cantidad, estado, categoria || null];
+        let sql = "UPDATE materiales SET nombre=?, cantidad=?, estado=?, categoria=?";
+        let valores = [nombre, cantidad, estado, categoria || null];
 
-    if (req.file) {
-        const fotoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
-        sql += ", foto=?";
-        valores.push(fotoBase64);
-    }
-
-    sql += " WHERE id=?";
-    valores.push(id);
-
-    conexion.query(sql, valores, (err, result) => {
-        if (err) {
-            res.status(500).json({ status: "error", mensaje: err.message || err });
-            return;
+        if (req.file) {
+            const fotoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+            sql += ", foto=?";
+            valores.push(fotoBase64);
         }
-        res.json({ status: "ok", mensaje: "Material actualizado" });
-    });
+
+        sql += " WHERE id=?";
+        valores.push(id);
+
+        conexion.query(sql, valores, (err, result) => {
+            if (err) {
+                res.status(500).json({ status: "error", mensaje: err.message || String(err) });
+                return;
+            }
+            res.json({ status: "ok", mensaje: "Material actualizado" });
+        });
+    } catch (errGen) {
+        res.status(500).json({ status: "error", mensaje: errGen.message || String(errGen) });
+    }
 });
 
 app.delete("/materiales/:id", verificarToken, soloAdmin, (req, res) => {
     const sql = "DELETE FROM materiales WHERE id=?";
     conexion.query(sql, [req.params.id], (err, result) => {
         if (err) {
-            res.status(500).json({ status: "error", mensaje: err.message || err });
+            res.status(500).json({ status: "error", mensaje: err.message || String(err) });
             return;
         }
         res.json({ status: "ok", mensaje: "Material eliminado" });
     });
+});
+
+// =============================================================================
+// FIX CRÍTICO: catch-all para rutas no encontradas y manejador de errores
+// global. Sin esto, Express/Vercel devuelven una página HTML (el
+// "<!DOCTYPE html>" que causaba el FormatException en Flutter) cuando algo
+// no esperado ocurre (ruta mal escrita, excepción no capturada, etc.).
+// =============================================================================
+app.use((req, res) => {
+    res.status(404).json({ status: "error", mensaje: `Ruta no encontrada: ${req.method} ${req.originalUrl}` });
+});
+
+app.use((err, req, res, next) => {
+    console.error("Error no capturado:", err);
+    res.status(500).json({ status: "error", mensaje: err.message || "Error interno del servidor" });
 });
 
 if (require.main === module) {
