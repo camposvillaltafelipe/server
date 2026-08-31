@@ -1038,43 +1038,46 @@ app.get("/maestros", (req, res) => {
 });
 
 // =============================================================================
-// Guía 16 — Subida de fotos con multer + gestión de categoría
+// Guía 16 — Subida de fotos con multer (memoria, sin disco) + categoría
+// -----------------------------------------------------------------------------
+// Vercel tiene el filesystem de solo lectura, así que NO se puede usar
+// multer.diskStorage guardando en "uploads/". En su lugar usamos
+// memoryStorage y guardamos la imagen como Base64 en la base de datos.
 // =============================================================================
 const multer = require("multer");
-const path = require("path");
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, "uploads/"),
-    filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname);
-        cb(null, `material_${Date.now()}${ext}`);
-    }
-});
-const upload = multer({ storage: storage });
-
-app.use("/uploads", express.static("uploads"));
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/materiales", (req, res) => {
     const sql = "SELECT id, nombre, cantidad, estado, categoria, foto FROM materiales";
     conexion.query(sql, (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err });
-        else res.json(result);
+        if (err) {
+            res.status(500).json({ status: "error", mensaje: err.message || err });
+            return;
+        }
+        res.json(result);
     });
 });
 
 app.post("/materiales", verificarToken, soloAdmin, upload.single("foto"), (req, res) => {
     const { nombre, cantidad, estado, categoria } = req.body;
-    const foto = req.file ? req.file.path : null;
 
     if (!nombre || !cantidad || !estado) {
-        res.json({ status: "fail", mensaje: "Faltan datos obligatorios" });
+        res.status(400).json({ status: "fail", mensaje: "Faltan datos obligatorios" });
         return;
     }
 
+    let fotoBase64 = null;
+    if (req.file) {
+        fotoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+    }
+
     const sql = "INSERT INTO materiales (nombre, cantidad, estado, categoria, foto) VALUES (?, ?, ?, ?, ?)";
-    conexion.query(sql, [nombre, cantidad, estado, categoria || null, foto], (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err.message || err });
-        else res.json({ status: "ok", mensaje: "Material agregado con foto y categoría" });
+    conexion.query(sql, [nombre, cantidad, estado, categoria || null, fotoBase64], (err, result) => {
+        if (err) {
+            res.status(500).json({ status: "error", mensaje: err.message || err });
+            return;
+        }
+        res.json({ status: "ok", mensaje: "Material agregado con foto y categoría" });
     });
 });
 
@@ -1086,24 +1089,31 @@ app.put("/materiales/:id", verificarToken, soloAdmin, upload.single("foto"), (re
     let valores = [nombre, cantidad, estado, categoria || null];
 
     if (req.file) {
+        const fotoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
         sql += ", foto=?";
-        valores.push(req.file.path);
+        valores.push(fotoBase64);
     }
 
     sql += " WHERE id=?";
     valores.push(id);
 
     conexion.query(sql, valores, (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err.message || err });
-        else res.json({ status: "ok", mensaje: "Material actualizado" });
+        if (err) {
+            res.status(500).json({ status: "error", mensaje: err.message || err });
+            return;
+        }
+        res.json({ status: "ok", mensaje: "Material actualizado" });
     });
 });
 
 app.delete("/materiales/:id", verificarToken, soloAdmin, (req, res) => {
     const sql = "DELETE FROM materiales WHERE id=?";
     conexion.query(sql, [req.params.id], (err, result) => {
-        if (err) res.json({ status: "error", mensaje: err.message || err });
-        else res.json({ status: "ok", mensaje: "Material eliminado" });
+        if (err) {
+            res.status(500).json({ status: "error", mensaje: err.message || err });
+            return;
+        }
+        res.json({ status: "ok", mensaje: "Material eliminado" });
     });
 });
 
