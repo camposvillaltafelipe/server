@@ -998,7 +998,34 @@ app.use((err, req, res, next) => {
     console.error("Error no capturado:", err);
     res.status(500).json({ status: "error", mensaje: err.message || "Error interno del servidor" });
 });
-
+app.get("/historial", (req, res) => {
+const { maestro, material, fecha_inicio, fecha_fin } = req.query;
+let sql = `
+SELECT p.id, m.nombre AS material, u.nombre AS docente,
+p.fecha_prestamo, p.fecha_devolucion
+FROM prestamos p
+JOIN materiales m ON p.material_id = m.id
+JOIN usuarios u ON p.docente_id = u.id
+WHERE 1=1
+`;
+const params = [];
+if (maestro) {
+sql += " AND u.nombre = ?";
+params.push(maestro);
+}
+if (material) {
+sql += " AND m.nombre = ?";
+params.push(material);
+}
+if (fecha_inicio && fecha_fin) {
+sql += " AND p.fecha_prestamo BETWEEN ? AND ?";
+params.push(fecha_inicio, fecha_fin);
+}
+conexion.query(sql, params, (err, result) => {
+if (err) return res.json({ status: "error", mensaje: err });
+res.json(result);
+});
+});
 if (require.main === module) {
     app.listen(3000, () => {
         console.log("Servidor local en http://localhost:3000");
