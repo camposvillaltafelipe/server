@@ -7,6 +7,7 @@
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.3.0",
     "mysql": "^2.18.1",
     "mysql2": "^3.23.3",
     "pdfkit": "^0.20.1",

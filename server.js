@@ -1037,6 +1037,76 @@ app.get("/maestros", (req, res) => {
     });
 });
 
+// =============================================================================
+// Guía 16 — Subida de fotos con multer + gestión de categoría
+// =============================================================================
+const multer = require("multer");
+const path = require("path");
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, "uploads/"),
+    filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname);
+        cb(null, `material_${Date.now()}${ext}`);
+    }
+});
+const upload = multer({ storage: storage });
+
+app.use("/uploads", express.static("uploads"));
+
+app.get("/materiales", (req, res) => {
+    const sql = "SELECT id, nombre, cantidad, estado, categoria, foto FROM materiales";
+    conexion.query(sql, (err, result) => {
+        if (err) res.json({ status: "error", mensaje: err });
+        else res.json(result);
+    });
+});
+
+app.post("/materiales", verificarToken, soloAdmin, upload.single("foto"), (req, res) => {
+    const { nombre, cantidad, estado, categoria } = req.body;
+    const foto = req.file ? req.file.path : null;
+
+    if (!nombre || !cantidad || !estado) {
+        res.json({ status: "fail", mensaje: "Faltan datos obligatorios" });
+        return;
+    }
+
+    const sql = "INSERT INTO materiales (nombre, cantidad, estado, categoria, foto) VALUES (?, ?, ?, ?, ?)";
+    conexion.query(sql, [nombre, cantidad, estado, categoria || null, foto], (err, result) => {
+        if (err) res.json({ status: "error", mensaje: err.message || err });
+        else res.json({ status: "ok", mensaje: "Material agregado con foto y categoría" });
+    });
+});
+
+app.put("/materiales/:id", verificarToken, soloAdmin, upload.single("foto"), (req, res) => {
+    const { nombre, cantidad, estado, categoria } = req.body;
+    const id = req.params.id;
+
+    let sql = "UPDATE materiales SET nombre=?, cantidad=?, estado=?, categoria=?";
+    let valores = [nombre, cantidad, estado, categoria || null];
+
+    if (req.file) {
+        sql += ", foto=?";
+        valores.push(req.file.path);
+    }
+
+    sql += " WHERE id=?";
+    valores.push(id);
+
+    conexion.query(sql, valores, (err, result) => {
+        if (err) res.json({ status: "error", mensaje: err.message || err });
+        else res.json({ status: "ok", mensaje: "Material actualizado" });
+    });
+});
+
+app.delete("/materiales/:id", verificarToken, soloAdmin, (req, res) => {
+    const sql = "DELETE FROM materiales WHERE id=?";
+    conexion.query(sql, [req.params.id], (err, result) => {
+        if (err) res.json({ status: "error", mensaje: err.message || err });
+        else res.json({ status: "ok", mensaje: "Material eliminado" });
+    });
+});
+
 if (require.main === module) {
     app.listen(3000, () => {
         console.log("Servidor local en http://localhost:3000");
