@@ -669,14 +669,25 @@ app.get("/reportes/devueltos", verificarToken, soloAdmin, (req, res) => {
 const PDFDocument = require("pdfkit");
 const ExcelJS = require("exceljs");
 
+// -----------------------------------------------------------------------------
+// FIX: construirFiltro ahora usa las columnas REALES del esquema:
+// prestamos.maestro (texto), materiales.nombre (vía material_id) y
+// prestamos.fecha_prestamo. Antes /historial usaba u.nombre y p.docente_id,
+// columnas que no existen en tu base de datos -> por eso el 404/"Algo salió
+// mal" que ves en la app.
+// -----------------------------------------------------------------------------
 function construirFiltro(req) {
-    const { maestro, fecha_inicio, fecha_fin } = req.query;
+    const { maestro, material, fecha_inicio, fecha_fin } = req.query;
     let condiciones = [];
     let valores = [];
 
     if (maestro) {
         condiciones.push("LOWER(TRIM(prestamos.maestro)) = LOWER(TRIM(?))");
         valores.push(maestro);
+    }
+    if (material) {
+        condiciones.push("LOWER(TRIM(materiales.nombre)) LIKE LOWER(TRIM(?))");
+        valores.push(`%${material}%`);
     }
     if (fecha_inicio) {
         condiciones.push("prestamos.fecha_prestamo >= ?");
@@ -690,6 +701,37 @@ function construirFiltro(req) {
     const whereSQL = condiciones.length > 0 ? "AND " + condiciones.join(" AND ") : "";
     return { whereSQL, valores };
 }
+
+// =============================================================================
+// Guía 17 — HISTORIAL DETALLADO DE PRÉSTAMOS (con filtros)
+// -----------------------------------------------------------------------------
+// FIX CRÍTICO: se reemplazó el JOIN roto (u.nombre / p.docente_id, columnas
+// inexistentes) por las columnas reales: prestamos.maestro y
+// materiales.nombre vía material_id. Se reutiliza construirFiltro() para
+// que /historial soporte los mismos filtros que /reportes/pdf y
+// /reportes/excel (maestro, material, fecha_inicio, fecha_fin).
+// =============================================================================
+app.get("/historial", (req, res) => {
+    const { whereSQL, valores } = construirFiltro(req);
+
+    const sql = `
+        SELECT prestamos.id, materiales.nombre AS material, prestamos.maestro AS docente,
+        prestamos.fecha_prestamo, prestamos.fecha_limite, prestamos.fecha_devolucion,
+        prestamos.devuelto
+        FROM prestamos
+        INNER JOIN materiales ON prestamos.material_id = materiales.id
+        WHERE 1=1 ${whereSQL}
+        ORDER BY prestamos.fecha_prestamo DESC
+    `;
+
+    conexion.query(sql, valores, (err, result) => {
+        if (err) {
+            res.status(500).json({ status: "error", mensaje: err.message || String(err) });
+            return;
+        }
+        res.json(result);
+    });
+});
 
 app.get("/reportes/pdf", verificarToken, soloAdmin, (req, res) => {
     const { whereSQL, valores } = construirFiltro(req);
@@ -932,8 +974,6 @@ app.post("/materiales", verificarToken, soloAdmin, subirFotoMiddleware, (req, re
         const sql = "INSERT INTO materiales (nombre, cantidad, estado, categoria, foto) VALUES (?, ?, ?, ?, ?)";
         conexion.query(sql, [nombre, cantidad, estado, categoria || null, fotoBase64], (err, result) => {
             if (err) {
-                // Si la columna categoria/foto no existe todavía en tu tabla real,
-                // este es el error más probable (ER_BAD_FIELD_ERROR).
                 res.status(500).json({ status: "error", mensaje: err.message || String(err) });
                 return;
             }
@@ -989,6 +1029,7 @@ app.delete("/materiales/:id", verificarToken, soloAdmin, (req, res) => {
 // global. Sin esto, Express/Vercel devuelven una página HTML (el
 // "<!DOCTYPE html>" que causaba el FormatException en Flutter) cuando algo
 // no esperado ocurre (ruta mal escrita, excepción no capturada, etc.).
+// Debe ir SIEMPRE al final, después de todas las rutas.
 // =============================================================================
 app.use((req, res) => {
     res.status(404).json({ status: "error", mensaje: `Ruta no encontrada: ${req.method} ${req.originalUrl}` });
@@ -998,34 +1039,7 @@ app.use((err, req, res, next) => {
     console.error("Error no capturado:", err);
     res.status(500).json({ status: "error", mensaje: err.message || "Error interno del servidor" });
 });
-app.get("/historial", (req, res) => {
-const { maestro, material, fecha_inicio, fecha_fin } = req.query;
-let sql = `
-SELECT p.id, m.nombre AS material, u.nombre AS docente,
-p.fecha_prestamo, p.fecha_devolucion
-FROM prestamos p
-JOIN materiales m ON p.material_id = m.id
-JOIN usuarios u ON p.docente_id = u.id
-WHERE 1=1
-`;
-const params = [];
-if (maestro) {
-sql += " AND u.nombre = ?";
-params.push(maestro);
-}
-if (material) {
-sql += " AND m.nombre = ?";
-params.push(material);
-}
-if (fecha_inicio && fecha_fin) {
-sql += " AND p.fecha_prestamo BETWEEN ? AND ?";
-params.push(fecha_inicio, fecha_fin);
-}
-conexion.query(sql, params, (err, result) => {
-if (err) return res.json({ status: "error", mensaje: err });
-res.json(result);
-});
-});
+
 if (require.main === module) {
     app.listen(3000, () => {
         console.log("Servidor local en http://localhost:3000");
